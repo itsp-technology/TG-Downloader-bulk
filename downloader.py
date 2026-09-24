@@ -10,7 +10,18 @@ from state import state, prevent_sleep, allow_sleep, DownloadCancelledException
 from utils import sanitize_filename, format_seconds, parse_telegram_url
 
 client: Any = TelegramClient('telegram_session', API_ID, API_HASH)
-CHUNK_SIZE = 128 * 1024
+
+# ==============================================================================
+# SPEED & ACCELERATION CONFIG
+# ==============================================================================
+try:
+    import cryptg
+    print("[Speed Boost] cryptg detected: Hardware C-acceleration active.")
+except ImportError:
+    print("[Warning] cryptg not found: Falling back to slower pure-Python AES.")
+
+# Increased to 512 KB to minimize ping latency round-trips
+CHUNK_SIZE = 512 * 1024
 
 def speed_progress_callback(current: int, total: int):
     if state.cancel_requested:
@@ -51,6 +62,7 @@ async def download_file_resumable(msg: Any, final_path: str, part_path: str):
             os.rename(part_path, final_path)
             return True
 
+        # Align offset to the Telegram chunk boundary
         start_offset = (part_size // CHUNK_SIZE) * CHUNK_SIZE
         if start_offset > 0:
             with open(part_path, "r+b") as fp:
@@ -252,7 +264,6 @@ async def run_batch_download(selected_ids: List[int], download_dir: str):
         total = len(selected_ids)
         state.total_files = total
 
-        # Pre-check already completed files on disk and mark them done
         downloaded_records: List[Dict[str, str]] = []
         pending_items = []
 
