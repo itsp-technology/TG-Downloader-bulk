@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lecture Downloader & Offline Study Hub</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen p-6 font-sans">
+    <div class="max-w-4xl mx-auto space-y-6">
+        
+        <div class="flex items-center justify-between border-b border-slate-800 pb-5">
+            <div>
+                <h1 class="text-2xl font-bold tracking-tight text-white flex items-center gap-2">
+                    <span class="p-2 bg-blue-600 rounded-lg text-lg">⚡</span> Batch Lecture Studio
+                </h1>
+                <p class="text-slate-400 text-xs mt-1">Sequential lecture downloader with auto-generated offline video index.</p>
+            </div>
+            <div id="liveBadge" class="px-3 py-1 rounded-full text-xs font-semibold bg-slate-800 text-slate-300">Idle</div>
+        </div>
+
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl space-y-4">
+            <label class="text-xs font-bold text-slate-300 uppercase tracking-wider">Telegram Topic or Channel URL</label>
+            <div class="flex gap-2">
+                <input id="urlInput" type="text" placeholder="https://t.me/c/2341143200/1869 or https://t.me/Gate_cse_2026/620" 
+                    class="flex-1 px-4 py-3 rounded-xl bg-slate-950 border border-slate-700 text-slate-200 focus:outline-none focus:border-blue-500 font-mono text-sm" />
+                <button id="scanBtn" onclick="scanTopic()" 
+                    class="bg-blue-600 hover:bg-blue-500 font-semibold px-6 py-3 rounded-xl transition flex items-center gap-2 text-sm shadow-lg shadow-blue-600/30">
+                    Scan Lectures
+                </button>
+            </div>
+        </div>
+
+        <div id="monitorCard" class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
+            <div class="flex justify-between items-center text-sm">
+                <span id="monFile" class="font-medium text-slate-200 truncate max-w-[420px]">Ready to scan</span>
+                <span id="monCounter" class="font-mono text-xs text-slate-400">0 / 0 Files</span>
+            </div>
+
+            <div class="space-y-1">
+                <div class="w-full bg-slate-950 h-3 rounded-full overflow-hidden border border-slate-800">
+                    <div id="progressBar" class="bg-gradient-to-r from-blue-600 to-indigo-500 h-full transition-all duration-300 w-0"></div>
+                </div>
+                <div class="flex justify-between text-[11px] font-mono text-slate-400 pt-1">
+                    <span id="sizeDetails">0 MB / 0 MB (0%)</span>
+                    <div class="flex gap-4">
+                        <span id="speedMeter">0.0 MB/s</span>
+                        <span id="etaMeter">ETA: --:--</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="flex justify-between items-center border-t border-slate-800/80 pt-4">
+                <p id="logText" class="text-xs text-blue-400 font-mono truncate max-w-[500px]">Idle</p>
+                <button id="cancelBtn" onclick="cancelDownload()" disabled
+                    class="bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/30 px-4 py-1.5 rounded-lg text-xs font-semibold transition disabled:opacity-30 disabled:cursor-not-allowed">
+                    Stop Download
+                </button>
+            </div>
+        </div>
+
+        <div id="queueSection" class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4 hidden">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-4">
+                <div>
+                    <h2 class="text-base font-bold text-white">Discovered Lectures & Materials</h2>
+                    <p class="text-xs text-slate-400" id="queueSummary">Select the lectures you want to download.</p>
+                </div>
+                <div class="flex items-center gap-2">
+                    <input id="folderInput" type="text" placeholder="Folder Name" 
+                        class="px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-200 font-mono focus:outline-none focus:border-blue-500" />
+                    <button onclick="startDownload()" 
+                        class="bg-emerald-600 hover:bg-emerald-500 text-white font-semibold px-4 py-2 rounded-lg text-xs transition shadow-lg shadow-emerald-600/30">
+                        Download Selected
+                    </button>
+                </div>
+            </div>
+
+            <div class="flex justify-between items-center text-xs text-slate-400 pb-2">
+                <div class="flex gap-3">
+                    <button onclick="toggleAll(true)" class="hover:text-white underline">Select All</button>
+                    <button onclick="toggleAll(false)" class="hover:text-white underline">Deselect All</button>
+                </div>
+                <div class="flex items-center gap-4">
+                    <label class="flex items-center gap-1.5 cursor-pointer">
+                        <input id="filterPdf" type="checkbox" checked onchange="filterType('pdf', this.checked)" class="rounded bg-slate-950 border-slate-700">
+                        <span>Include Notes (PDFs)</span>
+                    </label>
+                </div>
+            </div>
+
+            <div class="max-h-[380px] overflow-y-auto space-y-1.5 pr-1" id="itemsList"></div>
+        </div>
+
+    </div>
+
+    <script>
+        let scannedItems = [];
+
+        window.addEventListener('DOMContentLoaded', async () => {
+            try {
+                const res = await fetch('/api/initial-state');
+                const data = await res.json();
+
+                if (data.target_url) {
+                    document.getElementById('urlInput').value = data.target_url;
+                }
+                if (data.default_folder) {
+                    document.getElementById('folderInput').value = data.default_folder;
+                }
+                if (data.scanned_items && data.scanned_items.length > 0) {
+                    scannedItems = data.scanned_items;
+                    renderQueue();
+                    document.getElementById('queueSection').classList.remove('hidden');
+                }
+            } catch (e) {
+                console.error("State restore error:", e);
+            }
+        });
+
+        async function scanTopic() {
+            const url = document.getElementById('urlInput').value.trim();
+            if (!url) return alert('Enter a Telegram URL!');
+
+            const btn = document.getElementById('scanBtn');
+            btn.disabled = true;
+            btn.innerText = "Scanning...";
+
+            try {
+                const res = await fetch('/api/scan', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ url: url })
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    alert(data.message || 'Scan failed.');
+                } else {
+                    scannedItems = data.items;
+                    document.getElementById('folderInput').value = data.default_folder;
+                    renderQueue();
+                    document.getElementById('queueSection').classList.remove('hidden');
+                }
+            } catch(e) {
+                alert('Server error: ' + e);
+            } finally {
+                btn.disabled = false;
+                btn.innerText = "Scan Lectures";
+            }
+        }
+
+        function renderQueue() {
+            const container = document.getElementById('itemsList');
+            container.innerHTML = '';
+            let totalMB = 0;
+
+            scannedItems.forEach((item, index) => {
+                totalMB += item.size_mb;
+                const row = document.createElement('div');
+                row.className = `flex items-center justify-between p-3 rounded-xl bg-slate-950/60 border border-slate-800/80 text-xs item-row ${item.type}`;
+                row.innerHTML = `
+                    <div class="flex items-center gap-3 truncate max-w-[550px]">
+                        <input type="checkbox" value="${item.id}" checked class="item-chk rounded bg-slate-900 border-slate-700" />
+                        <span class="font-mono text-slate-500 font-semibold">#${(index + 1).toString().padStart(2, '0')}</span>
+                        <span class="px-1.5 py-0.5 rounded text-[10px] font-bold ${item.type === 'video' ? 'bg-blue-600/20 text-blue-400' : 'bg-red-600/20 text-red-400'}">${item.type.toUpperCase()}</span>
+                        <span class="text-slate-200 truncate font-medium">${item.title}</span>
+                    </div>
+                    <div class="flex items-center gap-4 text-slate-400 font-mono text-[11px]">
+                        <span>${item.duration || ''}</span>
+                        <span>${item.size_mb} MB</span>
+                    </div>
+                `;
+                container.appendChild(row);
+            });
+
+            document.getElementById('queueSummary').innerText = `${scannedItems.length} lectures found (~${Math.round(totalMB / 1024 * 10) / 10} GB total).`;
+        }
+
+        function toggleAll(status) {
+            document.querySelectorAll('.item-chk').forEach(chk => {
+                if (chk.closest('.item-row').style.display !== 'none') {
+                    chk.checked = status;
+                }
+            });
+        }
+
+        function filterType(type, isChecked) {
+            document.querySelectorAll(`.item-row.${type}`).forEach(el => {
+                el.style.display = isChecked ? 'flex' : 'none';
+                const chk = el.querySelector('.item-chk');
+                if (chk) chk.checked = isChecked;
+            });
+        }
+
+        async function startDownload() {
+            const checked = Array.from(document.querySelectorAll('.item-chk:checked')).map(c => parseInt(c.value));
+            if (checked.length === 0) return alert('Select at least one lecture!');
+
+            const folder = document.getElementById('folderInput').value.trim() || 'Downloads';
+
+            try {
+                const res = await fetch('/api/start-download', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ selected_ids: checked, folder_name: folder })
+                });
+                const data = await res.json();
+                if (!res.ok) alert(data.message);
+            } catch(e) {
+                alert('Error: ' + e);
+            }
+        }
+
+        async function cancelDownload() {
+            if (confirm('Stop the active download immediately?')) {
+                const cancelBtn = document.getElementById('cancelBtn');
+                cancelBtn.disabled = true;
+                cancelBtn.innerText = "Stopping...";
+                await fetch('/api/cancel', { method: 'POST' });
+            }
+        }
+
+        setInterval(async () => {
+            try {
+                const res = await fetch('/api/status');
+                const d = await res.json();
+
+                document.getElementById('logText').innerText = d.log;
+                const cancelBtn = document.getElementById('cancelBtn');
+
+                if (d.is_downloading) {
+                    cancelBtn.disabled = false;
+                    cancelBtn.innerText = "Stop Download";
+                    document.getElementById('liveBadge').innerText = "Downloading...";
+                    document.getElementById('liveBadge').className = "px-3 py-1 rounded-full text-xs font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/30";
+                    document.getElementById('monCounter').innerText = `${d.current_index} / ${d.total_files} Files`;
+                    document.getElementById('monFile').innerText = d.current_file;
+                    document.getElementById('progressBar').style.width = `${d.percent}%`;
+                    document.getElementById('sizeDetails').innerText = `${d.downloaded_mb} MB / ${d.total_mb} MB (${d.percent}%)`;
+                    document.getElementById('speedMeter').innerText = `${d.speed_mbps} MB/s`;
+                    document.getElementById('etaMeter').innerText = `ETA: ${d.eta}`;
+                } else {
+                    cancelBtn.disabled = true;
+                    cancelBtn.innerText = "Stop Download";
+                    document.getElementById('speedMeter').innerText = "0.0 MB/s";
+                    document.getElementById('etaMeter').innerText = "ETA: --:--";
+
+                    if (d.total_files > 0 && d.current_index === d.total_files) {
+                        document.getElementById('liveBadge').innerText = "Completed";
+                        document.getElementById('liveBadge').className = "px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30";
+                        document.getElementById('progressBar').style.width = '100%';
+                    } else {
+                        document.getElementById('liveBadge').innerText = "Idle";
+                        document.getElementById('liveBadge').className = "px-3 py-1 rounded-full text-xs font-semibold bg-slate-800 text-slate-300";
+                    }
+                }
+            } catch(e) {}
+        }, 1000);
+    </script>
+</body>
+</html>

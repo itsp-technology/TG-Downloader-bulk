@@ -21,7 +21,19 @@ raw_api_id = os.getenv("TELEGRAM_API_ID")
 API_HASH = os.getenv("TELEGRAM_API_HASH", "").strip()
 
 if not raw_api_id or not API_HASH:
-    sys.exit("[Error] TELEGRAM_API_ID or TELEGRAM_API_HASH missing. Please configure your .env file.")
+    # Pure Python fallback reader if python-dotenv is not installed
+    if os.path.exists(".env"):
+        with open(".env", "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    os.environ[k.strip()] = v.strip().strip("'").strip('"')
+        raw_api_id = os.getenv("TELEGRAM_API_ID")
+        API_HASH = os.getenv("TELEGRAM_API_HASH", "").strip()
+
+if not raw_api_id or not API_HASH:
+    sys.exit("[Error] TELEGRAM_API_ID or TELEGRAM_API_HASH missing in .env file.")
 
 try:
     API_ID = int(raw_api_id.strip())
@@ -63,8 +75,12 @@ def format_seconds(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}" if h > 0 else f"{m:02d}:{s:02d}"
 
 # ==============================================================================
-# 3. APP STATE & TELETHON SETUP
+# 3. APP STATE & CUSTOM EXCEPTIONS
 # ==============================================================================
+class DownloadCancelledException(Exception):
+    """Raised inside progress callback to immediately abort download."""
+    pass
+
 class AppState:
     def __init__(self):
         self.is_downloading: bool = False
@@ -78,9 +94,14 @@ class AppState:
         self.speed_mbps: float = 0.0
         self.eta_str: str = "--:--"
         self.log: str = "Ready."
+        
+        # State preservation across browser page reloads
+        self.target_url: str = ""
+        self.default_folder: str = ""
         self.scanned_items: List[Dict[str, Any]] = []
         self.active_peer: Any = None
         self.active_topic: Optional[int] = None
+        
         self.last_bytes: int = 0
         self.last_time: float = 0.0
 
@@ -127,6 +148,10 @@ async def startup_event():
         print("[Telegram] Session not authorized. Please run initial login script.")
 
 def speed_progress_callback(current: int, total: int):
+    # Instantly abort download stream if Stop button was pressed
+    if state.cancel_requested:
+        raise DownloadCancelledException("Download cancelled by user.")
+
     now = time.time()
     dt = now - state.last_time
 
@@ -153,7 +178,6 @@ def speed_progress_callback(current: int, total: int):
 # 4. DOWNLOAD ENGINE & OFFLINE PORTAL BUILDER
 # ==============================================================================
 def generate_offline_portal(download_dir: str, file_list: List[Dict[str, str]]):
-    """Generates an offline lecture study player in the output folder."""
     first_file = file_list[0]['filename'] if file_list else ''
     first_title = file_list[0]['title'] if file_list else 'No lectures'
     total_count = len(file_list)
@@ -279,11 +303,23 @@ async def run_batch_download(selected_ids: List[int], download_dir: str):
             state.last_time = time.time()
             state.last_bytes = 0
 
-            await client.download_media(msg, file=part_path, progress_callback=speed_progress_callback)
+            try:
+                await client.download_media(msg, file=part_path, progress_callback=speed_progress_callback)
+            except DownloadCancelledException:
+                state.log = "Download stopped immediately by user."
+                if os.path.exists(part_path):
+                    try:
+                        os.remove(part_path)
+                    except Exception:
+                        pass
+                break
 
             if state.cancel_requested:
                 if os.path.exists(part_path):
-                    os.remove(part_path)
+                    try:
+                        os.remove(part_path)
+                    except Exception:
+                        pass
                 break
 
             if os.path.exists(part_path):
@@ -297,20 +333,35 @@ async def run_batch_download(selected_ids: List[int], download_dir: str):
             state.log = f"All done! Offline study hub generated at '{download_dir}/study_index.html'."
 
     except Exception as e:
-        state.log = f"Error: {str(e)}"
+        if not state.cancel_requested:
+            state.log = f"Error: {str(e)}"
     finally:
         state.is_downloading = False
+        state.cancel_requested = False
+        state.speed_mbps = 0.0
+        state.eta_str = "--:--"
         allow_sleep()
 
 # ==============================================================================
 # 5. REST APIS
 # ==============================================================================
+@app.get("/api/initial-state")
+async def get_initial_state():
+    """Returns persistent state so browser refresh doesn't wipe scanned items."""
+    return {
+        "target_url": state.target_url,
+        "default_folder": state.default_folder,
+        "scanned_items": state.scanned_items,
+        "is_downloading": state.is_downloading
+    }
+
 @app.post("/api/scan")
 async def scan_topic(req: ScanRequest):
     try:
         peer, topic_id = parse_telegram_url(req.url)
         state.active_peer = peer
         state.active_topic = topic_id
+        state.target_url = req.url.strip()
 
         await client.get_dialogs()
         raw_entity = await client.get_entity(peer)
@@ -363,6 +414,7 @@ async def scan_topic(req: ScanRequest):
         state.scanned_items = items
 
         default_folder = f"Lectures_Topic_{topic_id}" if topic_id else "Lectures_Channel"
+        state.default_folder = default_folder
         return {"status": "ok", "items": items, "default_folder": default_folder}
 
     except Exception as e:
@@ -382,6 +434,7 @@ async def start_download(req: DownloadRequest, bg_tasks: BackgroundTasks):
 async def cancel_download():
     if state.is_downloading:
         state.cancel_requested = True
+        state.log = "Aborting active download..."
         return {"status": "cancelling"}
     return {"status": "idle"}
 
@@ -401,7 +454,7 @@ async def get_status():
     }
 
 # ==============================================================================
-# 6. DASHBOARD FRONTEND UI
+# 6. DASHBOARD FRONTEND UI (WITH PERSISTENCE & INSTANT ABORT)
 # ==============================================================================
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
@@ -504,6 +557,28 @@ async def serve_ui():
         <script>
             let scannedItems = [];
 
+            // Restore state on reload/refresh
+            window.addEventListener('DOMContentLoaded', async () => {
+                try {
+                    const res = await fetch('/api/initial-state');
+                    const data = await res.json();
+
+                    if (data.target_url) {
+                        document.getElementById('urlInput').value = data.target_url;
+                    }
+                    if (data.default_folder) {
+                        document.getElementById('folderInput').value = data.default_folder;
+                    }
+                    if (data.scanned_items && data.scanned_items.length > 0) {
+                        scannedItems = data.scanned_items;
+                        renderQueue();
+                        document.getElementById('queueSection').classList.remove('hidden');
+                    }
+                } catch (e) {
+                    console.error("State restore error:", e);
+                }
+            });
+
             async function scanTopic() {
                 const url = document.getElementById('urlInput').value.trim();
                 if (!url) return alert('Enter a Telegram URL!');
@@ -598,7 +673,10 @@ async def serve_ui():
             }
 
             async function cancelDownload() {
-                if (confirm('Are you sure you want to stop the active download?')) {
+                if (confirm('Stop the active download immediately?')) {
+                    const cancelBtn = document.getElementById('cancelBtn');
+                    cancelBtn.disabled = true;
+                    cancelBtn.innerText = "Stopping...";
                     await fetch('/api/cancel', { method: 'POST' });
                 }
             }
@@ -613,6 +691,7 @@ async def serve_ui():
 
                     if (d.is_downloading) {
                         cancelBtn.disabled = false;
+                        cancelBtn.innerText = "Stop Download";
                         document.getElementById('liveBadge').innerText = "Downloading...";
                         document.getElementById('liveBadge').className = "px-3 py-1 rounded-full text-xs font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/30";
                         document.getElementById('monCounter').innerText = `${d.current_index} / ${d.total_files} Files`;
@@ -623,6 +702,7 @@ async def serve_ui():
                         document.getElementById('etaMeter').innerText = `ETA: ${d.eta}`;
                     } else {
                         cancelBtn.disabled = true;
+                        cancelBtn.innerText = "Stop Download";
                         document.getElementById('speedMeter').innerText = "0.0 MB/s";
                         document.getElementById('etaMeter').innerText = "ETA: --:--";
 
