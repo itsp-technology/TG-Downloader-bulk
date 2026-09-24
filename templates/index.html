@@ -14,7 +14,7 @@
                 <h1 class="text-2xl font-bold tracking-tight text-white flex items-center gap-2">
                     <span class="p-2 bg-blue-600 rounded-lg text-lg">⚡</span> Batch Lecture Studio
                 </h1>
-                <p class="text-slate-400 text-xs mt-1">Sequential lecture downloader with pause/resume and offline video player.</p>
+                <p class="text-slate-400 text-xs mt-1">Multi-stream parallel lecture downloader with pause/resume and offline player.</p>
             </div>
             <div id="liveBadge" class="px-3 py-1 rounded-full text-xs font-semibold bg-slate-800 text-slate-300">Idle</div>
         </div>
@@ -31,12 +31,14 @@
             </div>
         </div>
 
+        <!-- Monitor Card with Multi-Stream Visuals -->
         <div id="monitorCard" class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
             <div class="flex justify-between items-center text-sm">
                 <span id="monFile" class="font-medium text-slate-200 truncate max-w-[420px]">Ready to scan</span>
                 <span id="monCounter" class="font-mono text-xs text-slate-400">0 / 0 Files</span>
             </div>
 
+            <!-- Master Progress Bar -->
             <div class="space-y-1">
                 <div class="w-full bg-slate-950 h-3 rounded-full overflow-hidden border border-slate-800">
                     <div id="progressBar" class="bg-gradient-to-r from-blue-600 to-indigo-500 h-full transition-all duration-300 w-0"></div>
@@ -47,6 +49,20 @@
                         <span id="speedMeter">0.0 MB/s</span>
                         <span id="etaMeter">ETA: --:--</span>
                     </div>
+                </div>
+            </div>
+
+            <!-- VidMate / IDM Multi-Stream Visual Indicator -->
+            <div id="streamsContainer" class="space-y-2 pt-3 border-t border-slate-800/80 hidden">
+                <div class="flex items-center justify-between text-[11px] font-semibold text-slate-400">
+                    <span class="flex items-center gap-2 text-indigo-400">
+                        <span class="w-2 h-2 rounded-full bg-indigo-500 animate-pulse"></span>
+                        Parallel Connection Streams (VidMate / IDM Engine)
+                    </span>
+                    <span class="text-[10px] text-slate-500 font-mono">4 Sockets Active</span>
+                </div>
+                <div id="streamsList" class="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                    <!-- Dynamic Stream Progress Elements Injected Here -->
                 </div>
             </div>
 
@@ -122,6 +138,10 @@
                     document.getElementById('queueSection').classList.remove('hidden');
                 }
 
+                if (data.streams && data.streams.length > 1) {
+                    renderStreams(data.streams);
+                }
+
                 if (data.can_resume || data.is_paused) {
                     setActionButtonMode("paused");
                 }
@@ -172,9 +192,16 @@
                     document.getElementById('sizeDetails').innerText = `${d.downloaded_mb} MB / ${d.total_mb} MB (${d.percent}%)`;
                     document.getElementById('speedMeter').innerText = `${d.speed_mbps} MB/s`;
                     document.getElementById('etaMeter').innerText = `ETA: ${d.eta}`;
+
+                    if (d.streams && d.streams.length > 1) {
+                        renderStreams(d.streams);
+                    } else {
+                        document.getElementById('streamsContainer').classList.add('hidden');
+                    }
                 } else {
                     document.getElementById('speedMeter').innerText = "0.0 MB/s";
                     document.getElementById('etaMeter').innerText = "ETA: --:--";
+                    document.getElementById('streamsContainer').classList.add('hidden');
 
                     if (d.can_resume || d.is_paused) {
                         setActionButtonMode("paused");
@@ -207,6 +234,28 @@
                     scheduleNextPoll(4000);
                 }
             }
+        }
+
+        function renderStreams(streams) {
+            const container = document.getElementById('streamsContainer');
+            const list = document.getElementById('streamsList');
+            container.classList.remove('hidden');
+            list.innerHTML = '';
+
+            streams.forEach(s => {
+                const item = document.createElement('div');
+                item.className = "p-2 rounded-lg bg-slate-950/70 border border-slate-800 space-y-1";
+                item.innerHTML = `
+                    <div class="flex justify-between items-center text-[10px] font-mono text-slate-300">
+                        <span class="font-semibold text-blue-400">Stream #${s.id}</span>
+                        <span>${s.downloaded_mb} / ${s.total_mb} MB (${s.percent}%)</span>
+                    </div>
+                    <div class="w-full bg-slate-900 h-1.5 rounded-full overflow-hidden">
+                        <div class="bg-gradient-to-r from-blue-500 to-indigo-400 h-full transition-all duration-200" style="width: ${s.percent}%"></div>
+                    </div>
+                `;
+                list.appendChild(item);
+            });
         }
 
         function setActionButtonMode(mode) {

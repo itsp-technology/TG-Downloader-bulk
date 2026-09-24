@@ -11,105 +11,175 @@ from utils import sanitize_filename, format_seconds, parse_telegram_url
 
 client: Any = TelegramClient('telegram_session', API_ID, API_HASH)
 
-# ==============================================================================
-# SPEED & ACCELERATION CONFIG
-# ==============================================================================
 try:
     import cryptg
     print("[Speed Boost] cryptg detected: Hardware C-acceleration active.")
 except ImportError:
-    print("[Warning] cryptg not found: Falling back to slower pure-Python AES.")
+    print("[Warning] cryptg not found: Falling back to pure-Python AES.")
 
-# Increased to 512 KB to minimize ping latency round-trips
-CHUNK_SIZE = 512 * 1024
+CHUNK_SIZE = 512 * 1024  # 512 KB per MTProto chunk
+MAX_PARALLEL_STREAMS = 4
 
-def speed_progress_callback(current: int, total: int):
-    if state.cancel_requested:
-        raise DownloadCancelledException("Download cancelled by user.")
-
+def update_aggregate_progress(total_size: int, stream_progress: List[int], stream_totals: List[int]):
+    """Aggregates all parallel streams into overall speed, ETA, and percentage."""
     now = time.time()
     dt = now - state.last_time
+    total_downloaded = sum(stream_progress)
 
-    if dt >= 0.8 or current == total:
-        bytes_delta = current - state.last_bytes
+    if dt >= 0.8 or total_downloaded == total_size:
+        bytes_delta = total_downloaded - state.last_bytes
         speed = (bytes_delta / dt) / (1024 * 1024) if dt > 0 else 0.0
         state.speed_mbps = round(speed, 2)
-        
-        remaining_bytes = total - current
+
+        remaining_bytes = max(0, total_size - total_downloaded)
         state.eta_str = format_seconds(remaining_bytes / (speed * 1024 * 1024)) if speed > 0 else "--:--"
 
         state.last_time = now
-        state.last_bytes = current
+        state.last_bytes = total_downloaded
 
-    if total > 0:
-        state.percent = round((current / total) * 100, 1)
-        state.downloaded_mb = current // (1024 * 1024)
-        state.total_mb = total // (1024 * 1024)
+    if total_size > 0:
+        state.percent = round((total_downloaded / total_size) * 100, 1)
+        state.downloaded_mb = total_downloaded // (1024 * 1024)
+        state.total_mb = total_size // (1024 * 1024)
 
-async def download_file_resumable(msg: Any, final_path: str, part_path: str):
+    # Update individual stream progress for UI representation
+    stream_data = []
+    for idx, (curr, tot) in enumerate(zip(stream_progress, stream_totals), start=1):
+        pct = round((curr / tot) * 100, 1) if tot > 0 else 0.0
+        stream_data.append({
+            "id": idx,
+            "percent": pct,
+            "downloaded_mb": round(curr / (1024 * 1024), 1),
+            "total_mb": round(tot / (1024 * 1024), 1)
+        })
+    state.streams = stream_data
+
+async def stream_worker(
+    worker_idx: int,
+    file_entity: Any,
+    part_path: str,
+    start_byte: int,
+    stream_total_bytes: int,
+    stream_progress: List[int],
+    stream_totals: List[int],
+    total_file_size: int
+):
+    """Downloads one segmented slice of the file in parallel."""
+    already_downloaded = 0
+    if os.path.exists(part_path):
+        cur_size = os.path.getsize(part_path)
+        if cur_size >= stream_total_bytes:
+            stream_progress[worker_idx] = stream_total_bytes
+            update_aggregate_progress(total_file_size, stream_progress, stream_totals)
+            return
+
+        # Align to 512 KB boundary
+        already_downloaded = (cur_size // CHUNK_SIZE) * CHUNK_SIZE
+        with open(part_path, "r+b") as fp:
+            fp.truncate(already_downloaded)
+
+    stream_progress[worker_idx] = already_downloaded
+    update_aggregate_progress(total_file_size, stream_progress, stream_totals)
+
+    fetch_offset = start_byte + already_downloaded
+    mode = "ab" if already_downloaded > 0 else "wb"
+
+    with open(part_path, mode) as fp:
+        async for chunk in client.iter_download(
+            file_entity,
+            offset=fetch_offset,
+            chunk_size=CHUNK_SIZE,
+            request_size=CHUNK_SIZE
+        ):
+            if state.cancel_requested:
+                raise DownloadCancelledException("Download paused by user.")
+
+            needed = min(len(chunk), stream_total_bytes - stream_progress[worker_idx])
+            if needed > 0:
+                fp.write(chunk[:needed])
+                stream_progress[worker_idx] += needed
+                update_aggregate_progress(total_file_size, stream_progress, stream_totals)
+
+            if stream_progress[worker_idx] >= stream_total_bytes:
+                break
+
+async def download_file_parallel(msg: Any, final_path: str):
+    """Splits file into 4 parallel connection streams, downloads concurrently, and merges."""
     total_size = msg.file.size if msg.file else 0
+    file_entity = msg.document if msg.document else msg
 
+    # Already completed verification
     if os.path.exists(final_path):
         if total_size == 0 or os.path.getsize(final_path) == total_size:
             return True
 
-    start_offset = 0
-    if os.path.exists(part_path):
-        part_size = os.path.getsize(part_path)
-        if total_size > 0 and part_size >= total_size:
-            if os.path.exists(final_path):
-                os.remove(final_path)
-            os.rename(part_path, final_path)
-            return True
+    # Use single connection for files smaller than 8 MB
+    num_streams = MAX_PARALLEL_STREAMS if total_size >= 8 * 1024 * 1024 else 1
 
-        # Align offset to the Telegram chunk boundary
-        start_offset = (part_size // CHUNK_SIZE) * CHUNK_SIZE
-        if start_offset > 0:
-            with open(part_path, "r+b") as fp:
-                fp.truncate(start_offset)
-        else:
-            start_offset = 0
+    total_chunks = (total_size + CHUNK_SIZE - 1) // CHUNK_SIZE
+    chunks_per_stream = (total_chunks + num_streams - 1) // num_streams
 
-    downloaded = start_offset
+    start_bytes = []
+    stream_totals = []
+    part_paths = []
+
+    for i in range(num_streams):
+        s_chunk = i * chunks_per_stream
+        e_chunk = min((i + 1) * chunks_per_stream, total_chunks)
+        s_byte = s_chunk * CHUNK_SIZE
+        e_byte = min(e_chunk * CHUNK_SIZE, total_size)
+        size_bytes = max(0, e_byte - s_byte)
+
+        start_bytes.append(s_byte)
+        stream_totals.append(size_bytes)
+        part_paths.append(f"{final_path}.part{i}")
+
+    stream_progress = [0] * num_streams
     state.last_time = time.time()
-    state.last_bytes = downloaded
+    state.last_bytes = 0
 
-    if total_size > 0:
-        speed_progress_callback(downloaded, total_size)
+    # Initialize stream cards in state for UI display
+    update_aggregate_progress(total_size, stream_progress, stream_totals)
 
-    mode = "ab" if start_offset > 0 else "wb"
+    # Launch parallel download workers
+    worker_tasks = [
+        asyncio.create_task(
+            stream_worker(
+                i, file_entity, part_paths[i], start_bytes[i],
+                stream_totals[i], stream_progress, stream_totals, total_size
+            )
+        )
+        for i in range(num_streams)
+        if stream_totals[i] > 0
+    ]
 
     try:
-        with open(part_path, mode) as fp:
-            async for chunk in client.iter_download(
-                msg,
-                offset=start_offset,
-                chunk_size=CHUNK_SIZE,
-                request_size=CHUNK_SIZE
-            ):
-                if state.cancel_requested:
-                    raise DownloadCancelledException("Download paused by user.")
-                fp.write(chunk)
-                downloaded += len(chunk)
-                if total_size > 0:
-                    speed_progress_callback(downloaded, total_size)
-
+        await asyncio.gather(*worker_tasks)
     except DownloadCancelledException:
+        for t in worker_tasks:
+            if not t.done():
+                t.cancel()
         raise
-    except Exception as e:
-        if start_offset == 0 and not state.cancel_requested:
-            await client.download_media(msg, file=part_path, progress_callback=speed_progress_callback)
-        else:
-            raise e
 
-    if os.path.exists(part_path):
-        if total_size == 0 or os.path.getsize(part_path) >= total_size:
-            if os.path.exists(final_path):
-                os.remove(final_path)
-            os.rename(part_path, final_path)
-            return True
+    # Merge parts into final file
+    state.log = "Merging parallel streams..."
+    tmp_final = final_path + ".tmp"
+    with open(tmp_final, "wb") as outfile:
+        for p in part_paths:
+            if os.path.exists(p):
+                with open(p, "rb") as infile:
+                    while chunk := infile.read(1024 * 1024):
+                        outfile.write(chunk)
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
 
-    return False
+    if os.path.exists(final_path):
+        os.remove(final_path)
+    os.rename(tmp_final, final_path)
+    state.streams = []
+    return True
 
 def generate_offline_portal(download_dir: str, file_list: List[Dict[str, str]]):
     first_file = file_list[0]['filename'] if file_list else ''
@@ -271,14 +341,13 @@ async def run_batch_download(selected_ids: List[int], download_dir: str):
             meta = id_to_meta.get(msg_id, {})
             filename = f"{index:02d}_{meta.get('clean_filename', f'file_{msg_id}.mp4')}"
             final_path = os.path.join(download_dir, filename)
-            part_path = final_path + ".part"
 
             if os.path.exists(final_path):
                 downloaded_records.append({"filename": filename, "title": meta.get('title', filename)})
                 if msg_id not in state.completed_ids:
                     state.completed_ids.append(msg_id)
             else:
-                pending_items.append((index, msg_id, filename, final_path, part_path, meta))
+                pending_items.append((index, msg_id, filename, final_path, meta))
 
         state.save_to_disk()
 
@@ -286,6 +355,7 @@ async def run_batch_download(selected_ids: List[int], download_dir: str):
             state.active_id = None
             state.current_index = total
             state.percent = 100.0
+            state.streams = []
             state.log = f"All {total} lectures already downloaded!"
             generate_offline_portal(download_dir, downloaded_records)
             state.can_resume = False
@@ -293,22 +363,13 @@ async def run_batch_download(selected_ids: List[int], download_dir: str):
             state.save_to_disk()
             return
 
-        first_index, first_id, first_filename, _, first_part, _ = pending_items[0]
+        first_index, first_id, first_filename, _, _ = pending_items[0]
         state.current_index = first_index
         state.current_file = first_filename
         state.active_id = first_id
-
-        if os.path.exists(first_part):
-            curr_bytes = os.path.getsize(first_part)
-            state.downloaded_mb = curr_bytes // (1024 * 1024)
-            state.log = f"Resuming lecture [{first_index}/{total}] from {state.downloaded_mb} MB..."
-        else:
-            state.percent = 0.0
-            state.log = f"Resuming from lecture [{first_index}/{total}]: {first_filename}"
-
         state.save_to_disk()
 
-        for index, msg_id, filename, final_path, part_path, meta in pending_items:
+        for index, msg_id, filename, final_path, meta in pending_items:
             if state.cancel_requested:
                 state.is_paused = True
                 state.can_resume = True
@@ -324,7 +385,7 @@ async def run_batch_download(selected_ids: List[int], download_dir: str):
             state.current_file = filename
             state.speed_mbps = 0.0
             state.eta_str = "--:--"
-            state.log = f"[{index}/{total}] Downloading: {filename}"
+            state.log = f"[{index}/{total}] Multi-Stream Downloading: {filename}"
             state.save_to_disk()
 
             raw_msg = await client.get_messages(entity, ids=msg_id)
@@ -333,7 +394,8 @@ async def run_batch_download(selected_ids: List[int], download_dir: str):
                 continue
 
             try:
-                await download_file_resumable(msg, final_path, part_path)
+                # 4-stream concurrent download engine
+                await download_file_parallel(msg, final_path)
             except (DownloadCancelledException, asyncio.CancelledError):
                 state.is_paused = True
                 state.can_resume = True
@@ -382,6 +444,7 @@ async def run_batch_download(selected_ids: List[int], download_dir: str):
             state.can_resume = False
             state.is_paused = False
             state.active_id = None
+            state.streams = []
             state.current_index = total
             state.percent = 100.0
             if downloaded_records:
