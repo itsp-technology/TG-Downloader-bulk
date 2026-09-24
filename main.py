@@ -19,6 +19,11 @@ logging.getLogger("uvicorn.access").addFilter(NoiseFilter())
 
 app = FastAPI(title="Lecture Batch Downloader Pro")
 
+@app.get("/speedtest")
+async def serve_speedtest():
+    template_path = os.path.join(os.path.dirname(__file__), "templates", "speedtest.html")
+    return FileResponse(template_path)
+
 class ScanRequest(BaseModel):
     url: str
 
