@@ -9,6 +9,7 @@
 <body class="bg-slate-950 text-slate-100 min-h-screen p-6 font-sans">
     <div class="max-w-4xl mx-auto space-y-6">
         
+        <!-- Header -->
         <div class="flex items-center justify-between border-b border-slate-800 pb-5">
             <div>
                 <h1 class="text-2xl font-bold tracking-tight text-white flex items-center gap-2">
@@ -16,22 +17,28 @@
                 </h1>
                 <p class="text-slate-400 text-xs mt-1">Multi-stream parallel lecture downloader with pause/resume and offline player.</p>
             </div>
-            <div id="liveBadge" class="px-3 py-1 rounded-full text-xs font-semibold bg-slate-800 text-slate-300">Idle</div>
+            <div class="flex items-center gap-3">
+                <a href="/speedtest" class="bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 px-3 py-1 rounded-full text-xs font-semibold transition flex items-center gap-1.5 shadow-sm">
+                    <span>🚀</span> Speed Test
+                </a>
+                <div id="liveBadge" class="px-3 py-1 rounded-full text-xs font-semibold bg-slate-800 text-slate-300">Idle</div>
+            </div>
         </div>
 
+        <!-- URL Input Card -->
         <div class="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl space-y-4">
             <label class="text-xs font-bold text-slate-300 uppercase tracking-wider">Telegram Topic or Channel URL</label>
             <div class="flex gap-2">
-                <input id="urlInput" type="text" placeholder="https://t.me/c/2341143200/1869 or https://t.me/Gate_cse_2026/620" 
+                <input id="urlInput" type="text" placeholder="https://t.me/c/2293028281/37178 or https://t.me/Gate_cse_2026/620" 
                     class="flex-1 px-4 py-3 rounded-xl bg-slate-950 border border-slate-700 text-slate-200 focus:outline-none focus:border-blue-500 font-mono text-sm" />
                 <button id="scanBtn" onclick="scanTopic()" 
-                    class="bg-blue-600 hover:bg-blue-500 font-semibold px-6 py-3 rounded-xl transition flex items-center gap-2 text-sm shadow-lg shadow-blue-600/30">
+                    class="bg-blue-600 hover:bg-blue-500 font-semibold px-6 py-3 rounded-xl transition flex items-center gap-2 text-sm shadow-lg shadow-blue-600/30 cursor-pointer">
                     Scan Lectures
                 </button>
             </div>
         </div>
 
-        <!-- Monitor Card with Multi-Stream Visuals -->
+        <!-- Active Download Monitor Card -->
         <div id="monitorCard" class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
             <div class="flex justify-between items-center text-sm">
                 <span id="monFile" class="font-medium text-slate-200 truncate max-w-[420px]">Ready to scan</span>
@@ -52,7 +59,7 @@
                 </div>
             </div>
 
-            <!-- VidMate / IDM Multi-Stream Visual Indicator -->
+            <!-- Multi-Stream Visual Indicator (VidMate / IDM Engine) -->
             <div id="streamsContainer" class="space-y-2 pt-3 border-t border-slate-800/80 hidden">
                 <div class="flex items-center justify-between text-[11px] font-semibold text-slate-400">
                     <span class="flex items-center gap-2 text-indigo-400">
@@ -62,13 +69,14 @@
                     <span class="text-[10px] text-slate-500 font-mono">4 Sockets Active</span>
                 </div>
                 <div id="streamsList" class="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
-                    <!-- Dynamic Stream Progress Elements Injected Here -->
+                    <!-- Stream progress cards injected here dynamically -->
                 </div>
             </div>
 
             <div class="flex justify-between items-center border-t border-slate-800/80 pt-4">
                 <p id="logText" class="text-xs text-blue-400 font-mono truncate max-w-[460px]">Idle</p>
                 <div class="flex items-center gap-2">
+                    <!-- Dynamic Action Button: Changes Stop <-> Resume -->
                     <button id="actionBtn" onclick="handleActionClick()" disabled
                         class="bg-slate-800 text-slate-500 px-4 py-1.5 rounded-lg text-xs font-semibold transition cursor-not-allowed">
                         Stop Download
@@ -77,6 +85,7 @@
             </div>
         </div>
 
+        <!-- Discovered Lectures & Materials Checklist -->
         <div id="queueSection" class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4 hidden">
             <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-4">
                 <div>
@@ -87,7 +96,7 @@
                     <input id="folderInput" type="text" placeholder="Folder Name" 
                         class="px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-200 font-mono focus:outline-none focus:border-blue-500" />
                     <button id="startDownloadBtn" onclick="startDownload()" 
-                        class="bg-blue-600 hover:bg-blue-500 text-white font-semibold px-4 py-2 rounded-lg text-xs transition shadow-lg shadow-blue-600/30">
+                        class="bg-blue-600 hover:bg-blue-500 text-white font-semibold px-4 py-2 rounded-lg text-xs transition shadow-lg shadow-blue-600/30 cursor-pointer">
                         Download Selected
                     </button>
                 </div>
@@ -150,6 +159,7 @@
             scheduleNextPoll(1000);
         });
 
+        // Pause polling when browser tab is inactive to save system resources
         document.addEventListener('visibilitychange', () => {
             if (document.hidden) {
                 isPollingActive = false;
