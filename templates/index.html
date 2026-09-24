@@ -53,7 +53,6 @@
             <div class="flex justify-between items-center border-t border-slate-800/80 pt-4">
                 <p id="logText" class="text-xs text-blue-400 font-mono truncate max-w-[460px]">Idle</p>
                 <div class="flex items-center gap-2">
-                    <!-- Dynamic Action Button: Changes Stop <-> Resume -->
                     <button id="actionBtn" onclick="handleActionClick()" disabled
                         class="bg-slate-800 text-slate-500 px-4 py-1.5 rounded-lg text-xs font-semibold transition cursor-not-allowed">
                         Stop Download
@@ -98,7 +97,9 @@
 
     <script>
         let scannedItems = [];
-        let currentMode = "idle"; // "downloading" | "paused" | "idle"
+        let completedIds = [];
+        let activeId = null;
+        let currentMode = "idle";
         let pollTimer = null;
         let consecutiveErrors = 0;
         let isPollingActive = true;
@@ -111,6 +112,9 @@
                 if (data.target_url) document.getElementById('urlInput').value = data.target_url;
                 if (data.default_folder) document.getElementById('folderInput').value = data.default_folder;
                 if (data.log) document.getElementById('logText').innerText = data.log;
+
+                completedIds = data.completed_ids || [];
+                activeId = data.active_id || null;
 
                 if (data.scanned_items && data.scanned_items.length > 0) {
                     scannedItems = data.scanned_items;
@@ -150,6 +154,11 @@
                 
                 const d = await res.json();
                 consecutiveErrors = 0;
+
+                completedIds = d.completed_ids || [];
+                activeId = d.active_id || null;
+
+                updateQueueBadges(d.is_downloading, d.is_paused);
 
                 document.getElementById('logText').innerText = d.log;
                 let nextDelay = 3000;
@@ -293,11 +302,13 @@
                 totalMB += item.size_mb;
                 const row = document.createElement('div');
                 row.className = `flex items-center justify-between p-3 rounded-xl bg-slate-950/60 border border-slate-800/80 text-xs item-row ${item.type}`;
+                row.id = `item-row-${item.id}`;
                 row.innerHTML = `
                     <div class="flex items-center gap-3 truncate max-w-[550px]">
                         <input type="checkbox" value="${item.id}" checked class="item-chk rounded bg-slate-900 border-slate-700" />
                         <span class="font-mono text-slate-500 font-semibold">#${(index + 1).toString().padStart(2, '0')}</span>
                         <span class="px-1.5 py-0.5 rounded text-[10px] font-bold ${item.type === 'video' ? 'bg-blue-600/20 text-blue-400' : 'bg-red-600/20 text-red-400'}">${item.type.toUpperCase()}</span>
+                        <span id="badge-${item.id}" class="px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-800 text-slate-400">Queued</span>
                         <span class="text-slate-200 truncate font-medium">${item.title}</span>
                     </div>
                     <div class="flex items-center gap-4 text-slate-400 font-mono text-[11px]">
@@ -309,6 +320,30 @@
             });
 
             document.getElementById('queueSummary').innerText = `${scannedItems.length} lectures found (~${Math.round(totalMB / 1024 * 10) / 10} GB total).`;
+            updateQueueBadges(false, false);
+        }
+
+        function updateQueueBadges(isDownloading, isPaused) {
+            scannedItems.forEach(item => {
+                const badge = document.getElementById(`badge-${item.id}`);
+                if (!badge) return;
+
+                if (completedIds.includes(item.id)) {
+                    badge.innerText = "✓ Done";
+                    badge.className = "px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30";
+                } else if (activeId === item.id) {
+                    if (isDownloading) {
+                        badge.innerText = "⏳ In-Progress";
+                        badge.className = "px-2 py-0.5 rounded text-[10px] font-semibold bg-blue-500/20 text-blue-300 border border-blue-500/30 animate-pulse";
+                    } else if (isPaused) {
+                        badge.innerText = "⏸ Paused";
+                        badge.className = "px-2 py-0.5 rounded text-[10px] font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/30";
+                    }
+                } else {
+                    badge.innerText = "Queued";
+                    badge.className = "px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-800 text-slate-400";
+                }
+            });
         }
 
         function toggleAll(status) {

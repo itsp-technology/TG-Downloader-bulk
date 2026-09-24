@@ -10,8 +10,6 @@ from state import state, prevent_sleep, allow_sleep, DownloadCancelledException
 from utils import sanitize_filename, format_seconds, parse_telegram_url
 
 client: Any = TelegramClient('telegram_session', API_ID, API_HASH)
-
-# Telegram MTProto requires offsets to be aligned (128 KB is standard)
 CHUNK_SIZE = 128 * 1024
 
 def speed_progress_callback(current: int, total: int):
@@ -38,13 +36,8 @@ def speed_progress_callback(current: int, total: int):
         state.total_mb = total // (1024 * 1024)
 
 async def download_file_resumable(msg: Any, final_path: str, part_path: str):
-    """
-    Downloads media using chunked offsets.
-    If a .part file exists, it resumes directly from that byte offset without restarting from 0.
-    """
     total_size = msg.file.size if msg.file else 0
 
-    # If completed file already exists and matches size, skip
     if os.path.exists(final_path):
         if total_size == 0 or os.path.getsize(final_path) == total_size:
             return True
@@ -58,7 +51,6 @@ async def download_file_resumable(msg: Any, final_path: str, part_path: str):
             os.rename(part_path, final_path)
             return True
 
-        # Align offset to Telegram 128KB boundary
         start_offset = (part_size // CHUNK_SIZE) * CHUNK_SIZE
         if start_offset > 0:
             with open(part_path, "r+b") as fp:
@@ -70,7 +62,6 @@ async def download_file_resumable(msg: Any, final_path: str, part_path: str):
     state.last_time = time.time()
     state.last_bytes = downloaded
 
-    # Pre-populate progress display with resumed byte position
     if total_size > 0:
         speed_progress_callback(downloaded, total_size)
 
@@ -92,16 +83,13 @@ async def download_file_resumable(msg: Any, final_path: str, part_path: str):
                     speed_progress_callback(downloaded, total_size)
 
     except DownloadCancelledException:
-        # DO NOT delete part_path on cancel! Keep downloaded bytes for resume.
         raise
     except Exception as e:
-        # Fallback for media types that don't support custom offset streaming
         if start_offset == 0 and not state.cancel_requested:
             await client.download_media(msg, file=part_path, progress_callback=speed_progress_callback)
         else:
             raise e
 
-    # Rename once completely finished
     if os.path.exists(part_path):
         if total_size == 0 or os.path.getsize(part_path) >= total_size:
             if os.path.exists(final_path):
@@ -264,7 +252,7 @@ async def run_batch_download(selected_ids: List[int], download_dir: str):
         total = len(selected_ids)
         state.total_files = total
 
-        # --- STEP 1: PRE-CHECK COMPLETED FILES ---
+        # Pre-check already completed files on disk and mark them done
         downloaded_records: List[Dict[str, str]] = []
         pending_items = []
 
@@ -276,11 +264,15 @@ async def run_batch_download(selected_ids: List[int], download_dir: str):
 
             if os.path.exists(final_path):
                 downloaded_records.append({"filename": filename, "title": meta.get('title', filename)})
+                if msg_id not in state.completed_ids:
+                    state.completed_ids.append(msg_id)
             else:
                 pending_items.append((index, msg_id, filename, final_path, part_path, meta))
 
-        # If everything is already finished
+        state.save_to_disk()
+
         if not pending_items:
+            state.active_id = None
             state.current_index = total
             state.percent = 100.0
             state.log = f"All {total} lectures already downloaded!"
@@ -290,12 +282,11 @@ async def run_batch_download(selected_ids: List[int], download_dir: str):
             state.save_to_disk()
             return
 
-        # --- STEP 2: JUMP IMMEDIATELY TO THE ACTIVE UNFINISHED LECTURE ---
-        first_index, _, first_filename, _, first_part, _ = pending_items[0]
+        first_index, first_id, first_filename, _, first_part, _ = pending_items[0]
         state.current_index = first_index
         state.current_file = first_filename
+        state.active_id = first_id
 
-        # If partial file exists, calculate its percentage for instant resume display
         if os.path.exists(first_part):
             curr_bytes = os.path.getsize(first_part)
             state.downloaded_mb = curr_bytes // (1024 * 1024)
@@ -306,22 +297,24 @@ async def run_batch_download(selected_ids: List[int], download_dir: str):
 
         state.save_to_disk()
 
-        # --- STEP 3: SEQUENTIAL DOWNLOAD (RESUMABLE) ---
         for index, msg_id, filename, final_path, part_path, meta in pending_items:
             if state.cancel_requested:
                 state.is_paused = True
                 state.can_resume = True
+                state.active_id = msg_id
                 state.current_index = index
                 state.current_file = filename
                 state.log = f"Paused at [{index}/{total}]: {filename}. Click 'Resume Download' to continue."
                 state.save_to_disk()
                 break
 
+            state.active_id = msg_id
             state.current_index = index
             state.current_file = filename
             state.speed_mbps = 0.0
             state.eta_str = "--:--"
             state.log = f"[{index}/{total}] Downloading: {filename}"
+            state.save_to_disk()
 
             raw_msg = await client.get_messages(entity, ids=msg_id)
             msg: Any = raw_msg[0] if isinstance(raw_msg, list) else raw_msg
@@ -329,22 +322,25 @@ async def run_batch_download(selected_ids: List[int], download_dir: str):
                 continue
 
             try:
-                # Downloads in chunked byte streams, retaining progress on interruption
                 await download_file_resumable(msg, final_path, part_path)
             except (DownloadCancelledException, asyncio.CancelledError):
                 state.is_paused = True
                 state.can_resume = True
+                state.active_id = msg_id
                 state.current_index = index
                 state.current_file = filename
                 state.log = f"Paused at [{index}/{total}]. Click 'Resume Download' to continue."
+                state.save_to_disk()
                 break
             except Exception as e:
                 if state.cancel_requested:
                     state.is_paused = True
                     state.can_resume = True
+                    state.active_id = msg_id
                     state.current_index = index
                     state.current_file = filename
                     state.log = f"Paused at [{index}/{total}]."
+                    state.save_to_disk()
                     break
                 else:
                     state.log = f"Skipping error on {filename}: {str(e)}"
@@ -355,21 +351,26 @@ async def run_batch_download(selected_ids: List[int], download_dir: str):
             if state.cancel_requested:
                 state.is_paused = True
                 state.can_resume = True
+                state.active_id = msg_id
                 state.current_index = index
                 state.current_file = filename
                 state.log = f"Paused at [{index}/{total}]. Click 'Resume Download' to continue."
+                state.save_to_disk()
                 break
 
             if os.path.exists(final_path):
                 downloaded_records.append({"filename": filename, "title": meta.get('title', filename)})
+                if msg_id not in state.completed_ids:
+                    state.completed_ids.append(msg_id)
+                state.save_to_disk()
 
-        # --- STEP 4: CONCLUSION ---
         if state.cancel_requested or state.is_paused:
             state.can_resume = True
             state.is_paused = True
         else:
             state.can_resume = False
             state.is_paused = False
+            state.active_id = None
             state.current_index = total
             state.percent = 100.0
             if downloaded_records:

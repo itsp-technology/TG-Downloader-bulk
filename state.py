@@ -45,6 +45,10 @@ class AppState:
         self.eta_str: str = "--:--"
         self.log: str = "Ready."
         
+        # Per-file live status trackers
+        self.completed_ids: List[int] = []
+        self.active_id: Optional[int] = None
+
         self.target_url: str = ""
         self.default_folder: str = ""
         self.download_folder: str = ""
@@ -76,6 +80,8 @@ class AppState:
                 "current_index": self.current_index,
                 "total_files": self.total_files,
                 "scanned_items": self.scanned_items,
+                "completed_ids": self.completed_ids,
+                "active_id": self.active_id,
                 "log": self.log
             }
             with open(STATE_FILE, "w", encoding="utf-8") as f:
@@ -97,6 +103,8 @@ class AppState:
                     self.current_index = data.get("current_index", 0)
                     self.total_files = data.get("total_files", 0)
                     self.scanned_items = data.get("scanned_items", [])
+                    self.completed_ids = data.get("completed_ids", [])
+                    self.active_id = data.get("active_id", None)
                     if self.can_resume:
                         self.log = f"Paused at [{self.current_index}/{self.total_files}]. Click 'Resume Download' to continue."
             except Exception:

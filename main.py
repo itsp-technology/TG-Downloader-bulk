@@ -8,9 +8,6 @@ from fastapi.responses import FileResponse, JSONResponse
 from state import state
 from downloader import client, scan_channel_or_topic, run_batch_download
 
-# ==============================================================================
-# LOG FILTER: Silences routine polling heartbeat from terminal stdout
-# ==============================================================================
 class NoiseFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()
@@ -35,7 +32,7 @@ async def startup_event():
     if await client.is_user_authorized():
         print("[Telegram] Ready & Authenticated.")
     else:
-        print("[Telegram] Warning: Not authorized. Please run initial login script.")
+        print("[Telegram] Warning: Not authorized. Run initial login script.")
 
 @app.get("/")
 async def serve_index():
@@ -49,6 +46,8 @@ async def get_initial_state():
         "default_folder": state.default_folder,
         "download_folder": state.download_folder,
         "scanned_items": state.scanned_items,
+        "completed_ids": state.completed_ids,
+        "active_id": state.active_id,
         "is_downloading": state.is_downloading,
         "can_resume": state.can_resume,
         "is_paused": state.is_paused,
@@ -113,6 +112,8 @@ async def handle_status():
         "is_downloading": state.is_downloading,
         "can_resume": state.can_resume,
         "is_paused": state.is_paused,
+        "completed_ids": state.completed_ids,
+        "active_id": state.active_id,
         "current_file": state.current_file,
         "current_index": state.current_index,
         "total_files": state.total_files,
