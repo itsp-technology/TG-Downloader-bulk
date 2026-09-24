@@ -11,6 +11,9 @@ from utils import sanitize_filename, format_seconds, parse_telegram_url
 
 client: Any = TelegramClient('telegram_session', API_ID, API_HASH)
 
+# Telegram MTProto requires offsets to be aligned (128 KB is standard)
+CHUNK_SIZE = 128 * 1024
+
 def speed_progress_callback(current: int, total: int):
     if state.cancel_requested:
         raise DownloadCancelledException("Download cancelled by user.")
@@ -33,6 +36,80 @@ def speed_progress_callback(current: int, total: int):
         state.percent = round((current / total) * 100, 1)
         state.downloaded_mb = current // (1024 * 1024)
         state.total_mb = total // (1024 * 1024)
+
+async def download_file_resumable(msg: Any, final_path: str, part_path: str):
+    """
+    Downloads media using chunked offsets.
+    If a .part file exists, it resumes directly from that byte offset without restarting from 0.
+    """
+    total_size = msg.file.size if msg.file else 0
+
+    # If completed file already exists and matches size, skip
+    if os.path.exists(final_path):
+        if total_size == 0 or os.path.getsize(final_path) == total_size:
+            return True
+
+    start_offset = 0
+    if os.path.exists(part_path):
+        part_size = os.path.getsize(part_path)
+        if total_size > 0 and part_size >= total_size:
+            if os.path.exists(final_path):
+                os.remove(final_path)
+            os.rename(part_path, final_path)
+            return True
+
+        # Align offset to Telegram 128KB boundary
+        start_offset = (part_size // CHUNK_SIZE) * CHUNK_SIZE
+        if start_offset > 0:
+            with open(part_path, "r+b") as fp:
+                fp.truncate(start_offset)
+        else:
+            start_offset = 0
+
+    downloaded = start_offset
+    state.last_time = time.time()
+    state.last_bytes = downloaded
+
+    # Pre-populate progress display with resumed byte position
+    if total_size > 0:
+        speed_progress_callback(downloaded, total_size)
+
+    mode = "ab" if start_offset > 0 else "wb"
+
+    try:
+        with open(part_path, mode) as fp:
+            async for chunk in client.iter_download(
+                msg,
+                offset=start_offset,
+                chunk_size=CHUNK_SIZE,
+                request_size=CHUNK_SIZE
+            ):
+                if state.cancel_requested:
+                    raise DownloadCancelledException("Download paused by user.")
+                fp.write(chunk)
+                downloaded += len(chunk)
+                if total_size > 0:
+                    speed_progress_callback(downloaded, total_size)
+
+    except DownloadCancelledException:
+        # DO NOT delete part_path on cancel! Keep downloaded bytes for resume.
+        raise
+    except Exception as e:
+        # Fallback for media types that don't support custom offset streaming
+        if start_offset == 0 and not state.cancel_requested:
+            await client.download_media(msg, file=part_path, progress_callback=speed_progress_callback)
+        else:
+            raise e
+
+    # Rename once completely finished
+    if os.path.exists(part_path):
+        if total_size == 0 or os.path.getsize(part_path) >= total_size:
+            if os.path.exists(final_path):
+                os.remove(final_path)
+            os.rename(part_path, final_path)
+            return True
+
+    return False
 
 def generate_offline_portal(download_dir: str, file_list: List[Dict[str, str]]):
     first_file = file_list[0]['filename'] if file_list else ''
@@ -165,15 +242,18 @@ async def scan_channel_or_topic(url: str):
     items.reverse()
     state.scanned_items = items
     state.default_folder = f"Lectures_Topic_{topic_id}" if topic_id else "Lectures_Channel"
+    state.save_to_disk()
     return items, state.default_folder
 
 async def run_batch_download(selected_ids: List[int], download_dir: str):
     state.is_downloading = True
     state.cancel_requested = False
-    state.log = "Starting download queue..."
+    state.is_paused = False
+    state.can_resume = False
+    state.selected_ids = selected_ids
+    state.download_folder = download_dir
+    state.save_to_disk()
     prevent_sleep()
-
-    downloaded_records: List[Dict[str, str]] = []
 
     try:
         os.makedirs(download_dir, exist_ok=True)
@@ -184,72 +264,126 @@ async def run_batch_download(selected_ids: List[int], download_dir: str):
         total = len(selected_ids)
         state.total_files = total
 
+        # --- STEP 1: PRE-CHECK COMPLETED FILES ---
+        downloaded_records: List[Dict[str, str]] = []
+        pending_items = []
+
         for index, msg_id in enumerate(selected_ids, start=1):
+            meta = id_to_meta.get(msg_id, {})
+            filename = f"{index:02d}_{meta.get('clean_filename', f'file_{msg_id}.mp4')}"
+            final_path = os.path.join(download_dir, filename)
+            part_path = final_path + ".part"
+
+            if os.path.exists(final_path):
+                downloaded_records.append({"filename": filename, "title": meta.get('title', filename)})
+            else:
+                pending_items.append((index, msg_id, filename, final_path, part_path, meta))
+
+        # If everything is already finished
+        if not pending_items:
+            state.current_index = total
+            state.percent = 100.0
+            state.log = f"All {total} lectures already downloaded!"
+            generate_offline_portal(download_dir, downloaded_records)
+            state.can_resume = False
+            state.is_paused = False
+            state.save_to_disk()
+            return
+
+        # --- STEP 2: JUMP IMMEDIATELY TO THE ACTIVE UNFINISHED LECTURE ---
+        first_index, _, first_filename, _, first_part, _ = pending_items[0]
+        state.current_index = first_index
+        state.current_file = first_filename
+
+        # If partial file exists, calculate its percentage for instant resume display
+        if os.path.exists(first_part):
+            curr_bytes = os.path.getsize(first_part)
+            state.downloaded_mb = curr_bytes // (1024 * 1024)
+            state.log = f"Resuming lecture [{first_index}/{total}] from {state.downloaded_mb} MB..."
+        else:
+            state.percent = 0.0
+            state.log = f"Resuming from lecture [{first_index}/{total}]: {first_filename}"
+
+        state.save_to_disk()
+
+        # --- STEP 3: SEQUENTIAL DOWNLOAD (RESUMABLE) ---
+        for index, msg_id, filename, final_path, part_path, meta in pending_items:
             if state.cancel_requested:
-                state.log = "Download cancelled by user."
+                state.is_paused = True
+                state.can_resume = True
+                state.current_index = index
+                state.current_file = filename
+                state.log = f"Paused at [{index}/{total}]: {filename}. Click 'Resume Download' to continue."
+                state.save_to_disk()
                 break
+
+            state.current_index = index
+            state.current_file = filename
+            state.speed_mbps = 0.0
+            state.eta_str = "--:--"
+            state.log = f"[{index}/{total}] Downloading: {filename}"
 
             raw_msg = await client.get_messages(entity, ids=msg_id)
             msg: Any = raw_msg[0] if isinstance(raw_msg, list) else raw_msg
             if not msg:
                 continue
 
-            meta = id_to_meta.get(msg_id, {})
-            filename = f"{index:02d}_{meta.get('clean_filename', f'file_{msg_id}.mp4')}"
-            final_path = os.path.join(download_dir, filename)
-            part_path = final_path + ".part"
-
-            state.current_index = index
-            state.current_file = filename
-            state.percent = 0.0
-            state.speed_mbps = 0.0
-            state.eta_str = "--:--"
-
-            if os.path.exists(final_path):
-                state.log = f"[{index}/{total}] Already exists: {filename}"
-                downloaded_records.append({"filename": filename, "title": meta.get('title', filename)})
-                await asyncio.sleep(0.2)
-                continue
-
-            state.log = f"[{index}/{total}] Downloading: {filename}"
-            state.last_time = time.time()
-            state.last_bytes = 0
-
             try:
-                await client.download_media(msg, file=part_path, progress_callback=speed_progress_callback)
-            except DownloadCancelledException:
-                state.log = "Download stopped immediately by user."
-                if os.path.exists(part_path):
-                    try:
-                        os.remove(part_path)
-                    except Exception:
-                        pass
+                # Downloads in chunked byte streams, retaining progress on interruption
+                await download_file_resumable(msg, final_path, part_path)
+            except (DownloadCancelledException, asyncio.CancelledError):
+                state.is_paused = True
+                state.can_resume = True
+                state.current_index = index
+                state.current_file = filename
+                state.log = f"Paused at [{index}/{total}]. Click 'Resume Download' to continue."
                 break
+            except Exception as e:
+                if state.cancel_requested:
+                    state.is_paused = True
+                    state.can_resume = True
+                    state.current_index = index
+                    state.current_file = filename
+                    state.log = f"Paused at [{index}/{total}]."
+                    break
+                else:
+                    state.log = f"Skipping error on {filename}: {str(e)}"
+                    state.can_resume = True
+                    state.is_paused = True
+                    continue
 
             if state.cancel_requested:
-                if os.path.exists(part_path):
-                    try:
-                        os.remove(part_path)
-                    except Exception:
-                        pass
+                state.is_paused = True
+                state.can_resume = True
+                state.current_index = index
+                state.current_file = filename
+                state.log = f"Paused at [{index}/{total}]. Click 'Resume Download' to continue."
                 break
 
-            if os.path.exists(part_path):
-                if os.path.exists(final_path):
-                    os.remove(final_path)
-                os.rename(part_path, final_path)
+            if os.path.exists(final_path):
                 downloaded_records.append({"filename": filename, "title": meta.get('title', filename)})
 
-        if not state.cancel_requested and downloaded_records:
-            generate_offline_portal(download_dir, downloaded_records)
-            state.log = f"All done! Offline study hub generated at '{download_dir}/study_index.html'."
+        # --- STEP 4: CONCLUSION ---
+        if state.cancel_requested or state.is_paused:
+            state.can_resume = True
+            state.is_paused = True
+        else:
+            state.can_resume = False
+            state.is_paused = False
+            state.current_index = total
+            state.percent = 100.0
+            if downloaded_records:
+                generate_offline_portal(download_dir, downloaded_records)
+                state.log = f"All {total} lectures downloaded! Offline hub created in '{download_dir}'."
 
     except Exception as e:
-        if not state.cancel_requested:
-            state.log = f"Error: {str(e)}"
+        state.can_resume = True
+        state.is_paused = True
+        state.log = f"Halted: {str(e)}. Click Resume Download to retry."
     finally:
         state.is_downloading = False
         state.cancel_requested = False
         state.speed_mbps = 0.0
         state.eta_str = "--:--"
+        state.save_to_disk()
         allow_sleep()

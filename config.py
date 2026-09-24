@@ -7,7 +7,7 @@ load_dotenv()
 raw_api_id = os.getenv("TELEGRAM_API_ID")
 API_HASH = os.getenv("TELEGRAM_API_HASH", "").strip()
 
-# Fallback parser if python-dotenv failed to load
+# Fallback reader if python-dotenv is not installed
 if not raw_api_id or not API_HASH:
     if os.path.exists(".env"):
         with open(".env", "r", encoding="utf-8") as f:
@@ -20,7 +20,7 @@ if not raw_api_id or not API_HASH:
         API_HASH = os.getenv("TELEGRAM_API_HASH", "").strip()
 
 if not raw_api_id or not API_HASH:
-    sys.exit("[Error] Missing TELEGRAM_API_ID or TELEGRAM_API_HASH in .env file.")
+    sys.exit("[Error] TELEGRAM_API_ID or TELEGRAM_API_HASH missing in .env file.")
 
 try:
     API_ID = int(raw_api_id.strip())

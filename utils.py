@@ -2,7 +2,7 @@ import re
 from typing import Union, Optional
 
 def sanitize_filename(name: str) -> str:
-    """Removes characters illegal in Windows paths."""
+    """Strips illegal Windows filesystem characters from names."""
     clean = re.sub(r'[\\/*?:"<>|]', "_", name)
     return clean.strip().rstrip('.')
 

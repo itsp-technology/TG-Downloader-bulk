@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+import json
 import time
 import ctypes
 import asyncio
@@ -20,8 +21,8 @@ load_dotenv()
 raw_api_id = os.getenv("TELEGRAM_API_ID")
 API_HASH = os.getenv("TELEGRAM_API_HASH", "").strip()
 
+# Fallback reader if python-dotenv is not present
 if not raw_api_id or not API_HASH:
-    # Pure Python fallback reader if python-dotenv is not installed
     if os.path.exists(".env"):
         with open(".env", "r", encoding="utf-8") as f:
             for line in f:
@@ -43,11 +44,12 @@ except ValueError:
 # ==============================================================================
 # 2. WINDOWS POWER MANAGEMENT (PREVENTS SLEEP WHILE DOWNLOADING)
 # ==============================================================================
+STATE_FILE = "downloads_state.json"
 ES_CONTINUOUS = 0x80000000
 ES_SYSTEM_REQUIRED = 0x00000001
 
 def prevent_sleep():
-    """Tells Windows kernel to keep CPU and Wi-Fi active during download."""
+    """Keeps CPU and Wi-Fi active during download."""
     if sys.platform == "win32":
         try:
             ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
@@ -63,7 +65,6 @@ def allow_sleep():
             pass
 
 def sanitize_filename(name: str) -> str:
-    """Strips illegal Windows characters from file names."""
     clean = re.sub(r'[\\/*?:"<>|]', "_", name)
     return clean.strip().rstrip('.')
 
@@ -75,16 +76,18 @@ def format_seconds(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}" if h > 0 else f"{m:02d}:{s:02d}"
 
 # ==============================================================================
-# 3. APP STATE & CUSTOM EXCEPTIONS
+# 3. APP STATE & DISK PERSISTENCE
 # ==============================================================================
 class DownloadCancelledException(Exception):
-    """Raised inside progress callback to immediately abort download."""
     pass
 
 class AppState:
     def __init__(self):
         self.is_downloading: bool = False
         self.cancel_requested: bool = False
+        self.can_resume: bool = False
+        self.is_paused: bool = False
+        
         self.current_file: str = ""
         self.current_index: int = 0
         self.total_files: int = 0
@@ -95,9 +98,10 @@ class AppState:
         self.eta_str: str = "--:--"
         self.log: str = "Ready."
         
-        # State preservation across browser page reloads
         self.target_url: str = ""
         self.default_folder: str = ""
+        self.download_folder: str = ""
+        self.selected_ids: List[int] = []
         self.scanned_items: List[Dict[str, Any]] = []
         self.active_peer: Any = None
         self.active_topic: Optional[int] = None
@@ -105,11 +109,51 @@ class AppState:
         self.last_bytes: int = 0
         self.last_time: float = 0.0
 
+        self.load_from_disk()
+
     def __setitem__(self, key: str, value: Any):
         setattr(self, key, value)
 
     def __getitem__(self, key: str) -> Any:
         return getattr(self, key)
+
+    def save_to_disk(self):
+        try:
+            data = {
+                "target_url": self.target_url,
+                "default_folder": self.default_folder,
+                "download_folder": self.download_folder,
+                "selected_ids": self.selected_ids,
+                "can_resume": self.can_resume,
+                "is_paused": self.is_paused,
+                "current_index": self.current_index,
+                "total_files": self.total_files,
+                "scanned_items": self.scanned_items,
+                "log": self.log
+            }
+            with open(STATE_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+        except Exception:
+            pass
+
+    def load_from_disk(self):
+        if os.path.exists(STATE_FILE):
+            try:
+                with open(STATE_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.target_url = data.get("target_url", "")
+                    self.default_folder = data.get("default_folder", "")
+                    self.download_folder = data.get("download_folder", "")
+                    self.selected_ids = data.get("selected_ids", [])
+                    self.can_resume = data.get("can_resume", False)
+                    self.is_paused = data.get("is_paused", False)
+                    self.current_index = data.get("current_index", 0)
+                    self.total_files = data.get("total_files", 0)
+                    self.scanned_items = data.get("scanned_items", [])
+                    if self.can_resume:
+                        self.log = f"Paused at [{self.current_index}/{self.total_files}]. Click 'Resume Download' to continue."
+            except Exception:
+                pass
 
 state = AppState()
 app = FastAPI(title="Lecture Batch Downloader Pro")
@@ -145,10 +189,9 @@ async def startup_event():
     if await client.is_user_authorized():
         print("[Telegram] Ready & Authenticated.")
     else:
-        print("[Telegram] Session not authorized. Please run initial login script.")
+        print("[Telegram] Session not authorized. Run login once.")
 
 def speed_progress_callback(current: int, total: int):
-    # Instantly abort download stream if Stop button was pressed
     if state.cancel_requested:
         raise DownloadCancelledException("Download cancelled by user.")
 
@@ -161,10 +204,7 @@ def speed_progress_callback(current: int, total: int):
         state.speed_mbps = round(speed, 2)
         
         remaining_bytes = total - current
-        if speed > 0:
-            state.eta_str = format_seconds(remaining_bytes / (speed * 1024 * 1024))
-        else:
-            state.eta_str = "--:--"
+        state.eta_str = format_seconds(remaining_bytes / (speed * 1024 * 1024)) if speed > 0 else "--:--"
 
         state.last_time = now
         state.last_bytes = current
@@ -258,7 +298,12 @@ def generate_offline_portal(download_dir: str, file_list: List[Dict[str, str]]):
 async def run_batch_download(selected_ids: List[int], download_dir: str):
     state.is_downloading = True
     state.cancel_requested = False
+    state.can_resume = False
+    state.is_paused = False
+    state.selected_ids = selected_ids
+    state.download_folder = download_dir
     state.log = "Starting download queue..."
+    state.save_to_disk()
     prevent_sleep()
 
     downloaded_records: List[Dict[str, str]] = []
@@ -274,7 +319,9 @@ async def run_batch_download(selected_ids: List[int], download_dir: str):
 
         for index, msg_id in enumerate(selected_ids, start=1):
             if state.cancel_requested:
-                state.log = "Download cancelled by user."
+                state.is_paused = True
+                state.can_resume = True
+                state.log = f"Paused at [{index}/{total}]. Click 'Resume Download' to continue."
                 break
 
             raw_msg = await client.get_messages(entity, ids=msg_id)
@@ -293,10 +340,11 @@ async def run_batch_download(selected_ids: List[int], download_dir: str):
             state.speed_mbps = 0.0
             state.eta_str = "--:--"
 
+            # Fast skip finished files
             if os.path.exists(final_path):
-                state.log = f"[{index}/{total}] Already exists: {filename}"
+                state.log = f"[{index}/{total}] Already downloaded: {filename}"
                 downloaded_records.append({"filename": filename, "title": meta.get('title', filename)})
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.1)
                 continue
 
             state.log = f"[{index}/{total}] Downloading: {filename}"
@@ -305,16 +353,37 @@ async def run_batch_download(selected_ids: List[int], download_dir: str):
 
             try:
                 await client.download_media(msg, file=part_path, progress_callback=speed_progress_callback)
-            except DownloadCancelledException:
-                state.log = "Download stopped immediately by user."
+            except (DownloadCancelledException, asyncio.CancelledError):
+                state.is_paused = True
+                state.can_resume = True
+                state.log = f"Paused at [{index}/{total}]. Click 'Resume Download' to continue."
                 if os.path.exists(part_path):
                     try:
                         os.remove(part_path)
                     except Exception:
                         pass
                 break
+            except Exception as e:
+                if state.cancel_requested:
+                    state.is_paused = True
+                    state.can_resume = True
+                    state.log = f"Paused at [{index}/{total}]. Click 'Resume Download' to continue."
+                    if os.path.exists(part_path):
+                        try:
+                            os.remove(part_path)
+                        except Exception:
+                            pass
+                    break
+                else:
+                    state.log = f"Skipping error on {filename}: {str(e)}"
+                    state.can_resume = True
+                    state.is_paused = True
+                    continue
 
             if state.cancel_requested:
+                state.is_paused = True
+                state.can_resume = True
+                state.log = f"Paused at [{index}/{total}]. Click 'Resume Download' to continue."
                 if os.path.exists(part_path):
                     try:
                         os.remove(part_path)
@@ -328,18 +397,29 @@ async def run_batch_download(selected_ids: List[int], download_dir: str):
                 os.rename(part_path, final_path)
                 downloaded_records.append({"filename": filename, "title": meta.get('title', filename)})
 
-        if not state.cancel_requested and downloaded_records:
-            generate_offline_portal(download_dir, downloaded_records)
-            state.log = f"All done! Offline study hub generated at '{download_dir}/study_index.html'."
+        if state.cancel_requested or state.is_paused:
+            state.can_resume = True
+            state.is_paused = True
+        else:
+            state.can_resume = False
+            state.is_paused = False
+            if downloaded_records:
+                generate_offline_portal(download_dir, downloaded_records)
+                state.log = f"All done! Offline study hub generated at '{download_dir}/study_index.html'."
 
     except Exception as e:
-        if not state.cancel_requested:
-            state.log = f"Error: {str(e)}"
+        state.can_resume = True
+        state.is_paused = True
+        state.log = f"Halted: {str(e)}. Click Resume Download to retry."
     finally:
         state.is_downloading = False
         state.cancel_requested = False
         state.speed_mbps = 0.0
         state.eta_str = "--:--"
+        if state.current_index < state.total_files:
+            state.can_resume = True
+            state.is_paused = True
+        state.save_to_disk()
         allow_sleep()
 
 # ==============================================================================
@@ -347,12 +427,17 @@ async def run_batch_download(selected_ids: List[int], download_dir: str):
 # ==============================================================================
 @app.get("/api/initial-state")
 async def get_initial_state():
-    """Returns persistent state so browser refresh doesn't wipe scanned items."""
     return {
         "target_url": state.target_url,
         "default_folder": state.default_folder,
+        "download_folder": state.download_folder,
         "scanned_items": state.scanned_items,
-        "is_downloading": state.is_downloading
+        "is_downloading": state.is_downloading,
+        "can_resume": state.can_resume,
+        "is_paused": state.is_paused,
+        "current_index": state.current_index,
+        "total_files": state.total_files,
+        "log": state.log
     }
 
 @app.post("/api/scan")
@@ -396,10 +481,7 @@ async def scan_topic(req: ScanRequest):
             title = sanitize_filename(title_candidate)
             ext = ".pdf" if is_pdf else ".mp4"
 
-            if not file_name:
-                clean_filename = f"{title[:40]}{ext}"
-            else:
-                clean_filename = sanitize_filename(file_name)
+            clean_filename = f"{title[:40]}{ext}" if not file_name else sanitize_filename(file_name)
 
             items.append({
                 "id": msg.id,
@@ -412,9 +494,9 @@ async def scan_topic(req: ScanRequest):
 
         items.reverse()
         state.scanned_items = items
-
         default_folder = f"Lectures_Topic_{topic_id}" if topic_id else "Lectures_Channel"
         state.default_folder = default_folder
+        state.save_to_disk()
         return {"status": "ok", "items": items, "default_folder": default_folder}
 
     except Exception as e:
@@ -423,18 +505,39 @@ async def scan_topic(req: ScanRequest):
 @app.post("/api/start-download")
 async def start_download(req: DownloadRequest, bg_tasks: BackgroundTasks):
     if state.is_downloading:
-        return JSONResponse({"status": "error", "message": "A download is already in progress!"}, status_code=400)
+        return JSONResponse({"status": "error", "message": "Download in progress!"}, status_code=400)
     if not req.selected_ids:
         return JSONResponse({"status": "error", "message": "No files selected."}, status_code=400)
 
     bg_tasks.add_task(run_batch_download, req.selected_ids, req.folder_name)
     return {"status": "started"}
 
+@app.post("/api/resume")
+async def resume_download(bg_tasks: BackgroundTasks):
+    if state.is_downloading:
+        return JSONResponse({"status": "error", "message": "Download is already running!"}, status_code=400)
+
+    if not state.selected_ids and state.scanned_items:
+        state.selected_ids = [item['id'] for item in state.scanned_items]
+        if not state.download_folder:
+            state.download_folder = state.default_folder or "Downloads"
+
+    if not state.selected_ids or not state.download_folder:
+        return JSONResponse({"status": "error", "message": "No paused download found to resume."}, status_code=400)
+
+    state.is_paused = False
+    state.can_resume = False
+    bg_tasks.add_task(run_batch_download, state.selected_ids, state.download_folder)
+    return {"status": "resumed"}
+
 @app.post("/api/cancel")
 async def cancel_download():
     if state.is_downloading:
         state.cancel_requested = True
-        state.log = "Aborting active download..."
+        state.is_paused = True
+        state.can_resume = True
+        state.log = "Pausing download... Click 'Resume Download' to continue."
+        state.save_to_disk()
         return {"status": "cancelling"}
     return {"status": "idle"}
 
@@ -442,6 +545,8 @@ async def cancel_download():
 async def get_status():
     return {
         "is_downloading": state.is_downloading,
+        "can_resume": state.can_resume,
+        "is_paused": state.is_paused,
         "current_file": state.current_file,
         "current_index": state.current_index,
         "total_files": state.total_files,
@@ -454,7 +559,7 @@ async def get_status():
     }
 
 # ==============================================================================
-# 6. DASHBOARD FRONTEND UI (WITH PERSISTENCE & INSTANT ABORT)
+# 6. DASHBOARD FRONTEND UI
 # ==============================================================================
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
@@ -475,7 +580,7 @@ async def serve_ui():
                     <h1 class="text-2xl font-bold tracking-tight text-white flex items-center gap-2">
                         <span class="p-2 bg-blue-600 rounded-lg text-lg">⚡</span> Batch Lecture Studio
                     </h1>
-                    <p class="text-slate-400 text-xs mt-1">Sequential lecture downloader with auto-generated offline video index.</p>
+                    <p class="text-slate-400 text-xs mt-1">Sequential lecture downloader with pause/resume and offline video player.</p>
                 </div>
                 <div id="liveBadge" class="px-3 py-1 rounded-full text-xs font-semibold bg-slate-800 text-slate-300">Idle</div>
             </div>
@@ -512,11 +617,14 @@ async def serve_ui():
                 </div>
 
                 <div class="flex justify-between items-center border-t border-slate-800/80 pt-4">
-                    <p id="logText" class="text-xs text-blue-400 font-mono truncate max-w-[500px]">Idle</p>
-                    <button id="cancelBtn" onclick="cancelDownload()" disabled
-                        class="bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/30 px-4 py-1.5 rounded-lg text-xs font-semibold transition disabled:opacity-30 disabled:cursor-not-allowed">
-                        Stop Download
-                    </button>
+                    <p id="logText" class="text-xs text-blue-400 font-mono truncate max-w-[460px]">Idle</p>
+                    <div class="flex items-center gap-2">
+                        <!-- Dynamic Smart Action Button -->
+                        <button id="actionBtn" onclick="handleActionClick()" disabled
+                            class="bg-slate-800 text-slate-500 px-4 py-1.5 rounded-lg text-xs font-semibold transition cursor-not-allowed">
+                            Stop Download
+                        </button>
+                    </div>
                 </div>
             </div>
 
@@ -524,13 +632,13 @@ async def serve_ui():
                 <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-4">
                     <div>
                         <h2 class="text-base font-bold text-white">Discovered Lectures & Materials</h2>
-                        <p class="text-xs text-slate-400" id="queueSummary">Select the lectures you want to download.</p>
+                        <p class="text-xs text-slate-400" id="queueSummary">Select lectures to download.</p>
                     </div>
                     <div class="flex items-center gap-2">
                         <input id="folderInput" type="text" placeholder="Folder Name" 
                             class="px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-200 font-mono focus:outline-none focus:border-blue-500" />
-                        <button onclick="startDownload()" 
-                            class="bg-emerald-600 hover:bg-emerald-500 text-white font-semibold px-4 py-2 rounded-lg text-xs transition shadow-lg shadow-emerald-600/30">
+                        <button id="startDownloadBtn" onclick="startDownload()" 
+                            class="bg-blue-600 hover:bg-blue-500 text-white font-semibold px-4 py-2 rounded-lg text-xs transition shadow-lg shadow-blue-600/30">
                             Download Selected
                         </button>
                     </div>
@@ -556,28 +664,81 @@ async def serve_ui():
 
         <script>
             let scannedItems = [];
+            let currentMode = "idle"; // "downloading" | "paused" | "idle"
 
-            // Restore state on reload/refresh
             window.addEventListener('DOMContentLoaded', async () => {
                 try {
                     const res = await fetch('/api/initial-state');
                     const data = await res.json();
 
-                    if (data.target_url) {
-                        document.getElementById('urlInput').value = data.target_url;
-                    }
-                    if (data.default_folder) {
-                        document.getElementById('folderInput').value = data.default_folder;
-                    }
+                    if (data.target_url) document.getElementById('urlInput').value = data.target_url;
+                    if (data.default_folder) document.getElementById('folderInput').value = data.default_folder;
+                    if (data.log) document.getElementById('logText').innerText = data.log;
+
                     if (data.scanned_items && data.scanned_items.length > 0) {
                         scannedItems = data.scanned_items;
                         renderQueue();
                         document.getElementById('queueSection').classList.remove('hidden');
                     }
+
+                    if (data.can_resume || data.is_paused) {
+                        setActionButtonMode("paused");
+                    }
                 } catch (e) {
                     console.error("State restore error:", e);
                 }
             });
+
+            function setActionButtonMode(mode) {
+                currentMode = mode;
+                const btn = document.getElementById('actionBtn');
+                const badge = document.getElementById('liveBadge');
+
+                if (mode === "downloading") {
+                    btn.disabled = false;
+                    btn.innerText = "⏹ Stop Download";
+                    btn.className = "bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/30 px-4 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer";
+                    badge.innerText = "Downloading...";
+                    badge.className = "px-3 py-1 rounded-full text-xs font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/30";
+                } else if (mode === "paused") {
+                    btn.disabled = false;
+                    btn.innerHTML = "<span>▶</span> Resume Download";
+                    btn.className = "bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-1.5 rounded-lg text-xs font-semibold transition shadow-lg shadow-emerald-600/30 cursor-pointer flex items-center gap-1.5";
+                    badge.innerText = "Paused";
+                    badge.className = "px-3 py-1 rounded-full text-xs font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/30";
+                } else {
+                    btn.disabled = true;
+                    btn.innerText = "Stop Download";
+                    btn.className = "bg-slate-800 text-slate-500 px-4 py-1.5 rounded-lg text-xs font-semibold cursor-not-allowed";
+                    badge.innerText = "Idle";
+                    badge.className = "px-3 py-1 rounded-full text-xs font-semibold bg-slate-800 text-slate-300";
+                }
+            }
+
+            async function handleActionClick() {
+                if (currentMode === "downloading") {
+                    const btn = document.getElementById('actionBtn');
+                    btn.disabled = true;
+                    btn.innerText = "Pausing...";
+                    await fetch('/api/cancel', { method: 'POST' });
+                    setActionButtonMode("paused");
+                } else if (currentMode === "paused") {
+                    const btn = document.getElementById('actionBtn');
+                    btn.disabled = true;
+                    btn.innerText = "Resuming...";
+                    try {
+                        const res = await fetch('/api/resume', { method: 'POST' });
+                        const data = await res.json();
+                        if (!res.ok) {
+                            alert(data.message || 'Failed to resume.');
+                            setActionButtonMode("paused");
+                        }
+                    } catch(e) {
+                        alert('Resume error: ' + e);
+                        setActionButtonMode("paused");
+                    }
+                }
+            }
 
             async function scanTopic() {
                 const url = document.getElementById('urlInput').value.trim();
@@ -672,28 +833,15 @@ async def serve_ui():
                 }
             }
 
-            async function cancelDownload() {
-                if (confirm('Stop the active download immediately?')) {
-                    const cancelBtn = document.getElementById('cancelBtn');
-                    cancelBtn.disabled = true;
-                    cancelBtn.innerText = "Stopping...";
-                    await fetch('/api/cancel', { method: 'POST' });
-                }
-            }
-
             setInterval(async () => {
                 try {
                     const res = await fetch('/api/status');
                     const d = await res.json();
 
                     document.getElementById('logText').innerText = d.log;
-                    const cancelBtn = document.getElementById('cancelBtn');
 
                     if (d.is_downloading) {
-                        cancelBtn.disabled = false;
-                        cancelBtn.innerText = "Stop Download";
-                        document.getElementById('liveBadge').innerText = "Downloading...";
-                        document.getElementById('liveBadge').className = "px-3 py-1 rounded-full text-xs font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/30";
+                        setActionButtonMode("downloading");
                         document.getElementById('monCounter').innerText = `${d.current_index} / ${d.total_files} Files`;
                         document.getElementById('monFile').innerText = d.current_file;
                         document.getElementById('progressBar').style.width = `${d.percent}%`;
@@ -701,18 +849,23 @@ async def serve_ui():
                         document.getElementById('speedMeter').innerText = `${d.speed_mbps} MB/s`;
                         document.getElementById('etaMeter').innerText = `ETA: ${d.eta}`;
                     } else {
-                        cancelBtn.disabled = true;
-                        cancelBtn.innerText = "Stop Download";
                         document.getElementById('speedMeter').innerText = "0.0 MB/s";
                         document.getElementById('etaMeter').innerText = "ETA: --:--";
 
-                        if (d.total_files > 0 && d.current_index === d.total_files) {
-                            document.getElementById('liveBadge').innerText = "Completed";
-                            document.getElementById('liveBadge').className = "px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30";
+                        if (d.can_resume || d.is_paused) {
+                            setActionButtonMode("paused");
+                        } else if (d.total_files > 0 && d.current_index === d.total_files) {
+                            const btn = document.getElementById('actionBtn');
+                            btn.disabled = true;
+                            btn.innerText = "Completed";
+                            btn.className = "bg-slate-800 text-slate-500 px-4 py-1.5 rounded-lg text-xs font-semibold cursor-not-allowed";
+
+                            const badge = document.getElementById('liveBadge');
+                            badge.innerText = "Completed";
+                            badge.className = "px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30";
                             document.getElementById('progressBar').style.width = '100%';
                         } else {
-                            document.getElementById('liveBadge').innerText = "Idle";
-                            document.getElementById('liveBadge').className = "px-3 py-1 rounded-full text-xs font-semibold bg-slate-800 text-slate-300";
+                            setActionButtonMode("idle");
                         }
                     }
                 } catch(e) {}
