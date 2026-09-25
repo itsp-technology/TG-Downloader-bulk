@@ -4,7 +4,6 @@ import json
 import ctypes
 from typing import Optional, List, Dict, Any
 
-STATE_FILE = "downloads_state.json"
 ES_CONTINUOUS = 0x80000000
 ES_SYSTEM_REQUIRED = 0x00000001
 
@@ -25,11 +24,13 @@ def allow_sleep():
             pass
 
 class DownloadCancelledException(Exception):
-    """Raised to immediately break download stream on user request."""
     pass
 
 class AppState:
-    def __init__(self):
+    def __init__(self, storage_dir: str):
+        self.storage_dir = storage_dir
+        self.state_file = os.path.join(storage_dir, "downloads_state.json")
+
         self.is_downloading: bool = False
         self.cancel_requested: bool = False
         self.can_resume: bool = False
@@ -45,10 +46,12 @@ class AppState:
         self.eta_str: str = "--:--"
         self.log: str = "Ready."
         
-        # Per-file & Multi-stream live status trackers
         self.completed_ids: List[int] = []
         self.active_id: Optional[int] = None
         self.streams: List[Dict[str, Any]] = []
+
+        self.auth_phone: str = ""
+        self.phone_code_hash: str = ""
 
         self.target_url: str = ""
         self.default_folder: str = ""
@@ -86,15 +89,15 @@ class AppState:
                 "streams": self.streams,
                 "log": self.log
             }
-            with open(STATE_FILE, "w", encoding="utf-8") as f:
+            with open(self.state_file, "w", encoding="utf-8") as f:
                 json.dump(data, f)
         except Exception:
             pass
 
     def load_from_disk(self):
-        if os.path.exists(STATE_FILE):
+        if os.path.exists(self.state_file):
             try:
-                with open(STATE_FILE, "r", encoding="utf-8") as f:
+                with open(self.state_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     self.target_url = data.get("target_url", "")
                     self.default_folder = data.get("default_folder", "")
@@ -113,4 +116,29 @@ class AppState:
             except Exception:
                 pass
 
-state = AppState()
+    def reset(self):
+        """Wipes active session state."""
+        self.is_downloading = False
+        self.can_resume = False
+        self.is_paused = False
+        self.current_file = ""
+        self.current_index = 0
+        self.total_files = 0
+        self.percent = 0.0
+        self.downloaded_mb = 0
+        self.total_mb = 0
+        self.speed_mbps = 0.0
+        self.eta_str = "--:--"
+        self.log = "Logged out."
+        self.completed_ids = []
+        self.active_id = None
+        self.streams = []
+        self.auth_phone = ""
+        self.phone_code_hash = ""
+        self.target_url = ""
+        self.scanned_items = []
+        if os.path.exists(self.state_file):
+            try:
+                os.remove(self.state_file)
+            except Exception:
+                pass

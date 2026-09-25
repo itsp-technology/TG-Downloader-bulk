@@ -17,11 +17,17 @@
                 </h1>
                 <p class="text-slate-400 text-xs mt-1">Multi-stream parallel lecture downloader with pause/resume and offline player.</p>
             </div>
-            <div class="flex items-center gap-3">
-                <a href="/speedtest" class="bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 px-3 py-1 rounded-full text-xs font-semibold transition flex items-center gap-1.5 shadow-sm">
+            <div class="flex items-center gap-2 sm:gap-3 flex-wrap justify-end">
+                <button onclick="openSettingsModal()" id="tgStatusBtn" 
+                    class="bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700 px-3 py-1.5 rounded-full text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer shadow-sm">
+                    <span id="tgDot" class="w-2 h-2 rounded-full bg-amber-500"></span>
+                    <span id="tgUserLabel">Telegram Account</span>
+                </button>
+
+                <a href="/speedtest" class="bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 px-3 py-1.5 rounded-full text-xs font-semibold transition flex items-center gap-1.5 shadow-sm">
                     <span>🚀</span> Speed Test
                 </a>
-                <div id="liveBadge" class="px-3 py-1 rounded-full text-xs font-semibold bg-slate-800 text-slate-300">Idle</div>
+                <div id="liveBadge" class="px-3 py-1.5 rounded-full text-xs font-semibold bg-slate-800 text-slate-300">Idle</div>
             </div>
         </div>
 
@@ -124,6 +130,86 @@
 
     </div>
 
+    <!-- Telegram API & Account Login Modal -->
+    <div id="settingsModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 hidden">
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl max-w-lg w-full p-6 shadow-2xl space-y-5">
+            <div class="flex items-center justify-between border-b border-slate-800 pb-4">
+                <h3 class="text-base font-bold text-white flex items-center gap-2">
+                    <span>⚙️</span> Telegram Private Session & Login
+                </h3>
+                <button onclick="closeSettingsModal()" class="text-slate-400 hover:text-white text-lg font-bold">&times;</button>
+            </div>
+
+            <div id="modalStatusBanner" class="p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs font-mono text-slate-300">
+                Checking Telegram status...
+            </div>
+
+            <!-- Step 1: API ID & Masked API Hash -->
+            <div class="space-y-3">
+                <div class="flex justify-between items-center text-xs">
+                    <label class="font-bold text-slate-300 uppercase tracking-wider">Step 1: Telegram API Credentials</label>
+                    <a href="https://my.telegram.org" target="_blank" class="text-blue-400 hover:underline">Get from my.telegram.org ↗</a>
+                </div>
+                <div class="space-y-2">
+                    <input id="cfgApiId" type="number" placeholder="API ID (e.g. 1234567)" 
+                        class="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-200 font-mono focus:outline-none focus:border-blue-500" />
+                    
+                    <div class="relative">
+                        <input id="cfgApiHash" type="password" placeholder="API Hash (Never exposed to other users)" 
+                            class="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-200 font-mono focus:outline-none focus:border-blue-500 pr-10" />
+                        <button type="button" onclick="toggleHashVisibility()" class="absolute right-2.5 top-2 text-xs text-slate-400 hover:text-slate-200 cursor-pointer">
+                            👁️
+                        </button>
+                    </div>
+                </div>
+                <button onclick="saveApiCredentials()" 
+                    class="w-full bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold py-2 rounded-lg text-xs transition cursor-pointer">
+                    Save API Credentials to Session
+                </button>
+            </div>
+
+            <!-- Step 2: Phone Login & OTP Verification -->
+            <div class="space-y-3 pt-3 border-t border-slate-800">
+                <label class="font-bold text-slate-300 text-xs uppercase tracking-wider block">Step 2: Sign In With Telegram</label>
+                
+                <div class="flex gap-2">
+                    <input id="cfgPhone" type="text" placeholder="Phone Number (e.g. +919876543210)" 
+                        class="flex-1 px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-200 font-mono focus:outline-none focus:border-blue-500" />
+                    <button id="sendCodeBtn" onclick="sendLoginCode()" 
+                        class="bg-blue-600 hover:bg-blue-500 text-white font-semibold px-4 py-2 rounded-lg text-xs transition cursor-pointer whitespace-nowrap">
+                        Send OTP
+                    </button>
+                </div>
+
+                <div id="otpSection" class="space-y-2 hidden">
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <input id="cfgCode" type="text" placeholder="Telegram OTP Code" 
+                            class="px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-200 font-mono focus:outline-none focus:border-blue-500" />
+                        <input id="cfgPassword" type="password" placeholder="2FA Password (if enabled)" 
+                            class="px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-200 font-mono focus:outline-none focus:border-blue-500" />
+                    </div>
+                    <button id="signInBtn" onclick="submitSignIn()" 
+                        class="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-2 rounded-lg text-xs transition shadow-lg shadow-emerald-600/30 cursor-pointer">
+                        Complete Sign In
+                    </button>
+                </div>
+            </div>
+
+            <!-- Modal Footer with Logout Action -->
+            <div class="flex items-center justify-between pt-3 border-t border-slate-800">
+                <button id="modalLogoutBtn" onclick="performLogout()" 
+                    class="bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/30 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer flex items-center gap-1.5 hidden">
+                    <span>🚪</span> Log Out
+                </button>
+                <div class="flex-1"></div>
+                <button onclick="closeSettingsModal()" 
+                    class="px-4 py-1.5 rounded-lg bg-slate-800 text-slate-300 text-xs font-semibold hover:bg-slate-700 cursor-pointer">
+                    Close
+                </button>
+            </div>
+        </div>
+    </div>
+
     <script>
         let scannedItems = [];
         let completedIds = [];
@@ -134,13 +220,14 @@
         let isPollingActive = true;
 
         window.addEventListener('DOMContentLoaded', async () => {
+            await checkTelegramAuth();
+
             try {
                 const res = await fetch('/api/initial-state');
                 const data = await res.json();
 
                 if (data.target_url) document.getElementById('urlInput').value = data.target_url;
                 
-                // Prioritize user's saved custom download path over default name
                 if (data.download_folder) {
                     document.getElementById('folderInput').value = data.download_folder;
                 } else if (data.default_folder) {
@@ -170,7 +257,172 @@
             scheduleNextPoll(1000);
         });
 
-        // Native Windows folder picker invoker
+        async function checkTelegramAuth() {
+            try {
+                const res = await fetch('/api/telegram-auth/status');
+                const data = await res.json();
+                const dot = document.getElementById('tgDot');
+                const label = document.getElementById('tgUserLabel');
+                const banner = document.getElementById('modalStatusBanner');
+                const logoutBtn = document.getElementById('modalLogoutBtn');
+
+                if (data.configured && data.authorized) {
+                    dot.className = "w-2 h-2 rounded-full bg-emerald-500";
+                    label.innerText = data.user_info || "Connected";
+                    banner.innerHTML = `<span class="text-emerald-400 font-bold">✓ Logged In:</span> ${data.user_info}`;
+                    if (data.masked_api_id) document.getElementById('cfgApiId').placeholder = `Active ID: ${data.masked_api_id}`;
+                    logoutBtn.classList.remove('hidden');
+                } else if (data.configured && !data.authorized) {
+                    dot.className = "w-2 h-2 rounded-full bg-amber-500 animate-pulse";
+                    label.innerText = "Login Needed";
+                    banner.innerHTML = `<span class="text-amber-400 font-bold">⚠ Session Not Signed In:</span> Enter phone number below to receive an OTP.`;
+                    if (data.masked_api_id) document.getElementById('cfgApiId').placeholder = `Configured ID: ${data.masked_api_id}`;
+                    logoutBtn.classList.remove('hidden');
+                } else {
+                    dot.className = "w-2 h-2 rounded-full bg-red-500";
+                    label.innerText = "Setup API";
+                    banner.innerHTML = `<span class="text-red-400 font-bold">⚠ Setup Required:</span> Enter your API ID & Hash from my.telegram.org.`;
+                    logoutBtn.classList.add('hidden');
+                }
+                return data;
+            } catch (e) {
+                return { configured: false, authorized: false };
+            }
+        }
+
+        function toggleHashVisibility() {
+            const input = document.getElementById('cfgApiHash');
+            input.type = input.type === 'password' ? 'text' : 'password';
+        }
+
+        function openSettingsModal() {
+            document.getElementById('settingsModal').classList.remove('hidden');
+            checkTelegramAuth();
+        }
+
+        function closeSettingsModal() {
+            document.getElementById('settingsModal').classList.add('hidden');
+        }
+
+        async function saveApiCredentials() {
+            const apiId = document.getElementById('cfgApiId').value.trim();
+            const apiHash = document.getElementById('cfgApiHash').value.trim();
+
+            if (!apiId || !apiHash) return alert('Enter both API ID and API Hash!');
+
+            try {
+                const res = await fetch('/api/telegram-auth/save-credentials', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ api_id: parseInt(apiId), api_hash: apiHash })
+                });
+                const data = await res.json();
+                if (!res.ok) alert(data.message || 'Error saving API credentials.');
+                else {
+                    alert(data.message);
+                    document.getElementById('cfgApiHash').value = '';
+                    checkTelegramAuth();
+                }
+            } catch (e) {
+                alert('Request failed: ' + e);
+            }
+        }
+
+        async function sendLoginCode() {
+            const phone = document.getElementById('cfgPhone').value.trim();
+            if (!phone) return alert('Enter phone number with international country code! (e.g. +91...)');
+
+            const btn = document.getElementById('sendCodeBtn');
+            btn.disabled = true;
+            btn.innerText = "Sending...";
+
+            try {
+                const res = await fetch('/api/telegram-auth/send-code', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ phone: phone })
+                });
+                const data = await res.json();
+                if (!res.ok) alert(data.message || 'Failed to send OTP code.');
+                else {
+                    alert(data.message);
+                    document.getElementById('otpSection').classList.remove('hidden');
+                    document.getElementById('modalStatusBanner').innerHTML = `<span class="text-blue-400 font-bold">OTP Sent:</span> Check your Telegram app for the verification code.`;
+                }
+            } catch (e) {
+                alert('Request error: ' + e);
+            } finally {
+                btn.disabled = false;
+                btn.innerText = "Send OTP";
+            }
+        }
+
+        async function submitSignIn() {
+            const code = document.getElementById('cfgCode').value.trim();
+            const password = document.getElementById('cfgPassword').value.trim();
+
+            if (!code) return alert('Enter the OTP code received in your Telegram app!');
+
+            const btn = document.getElementById('signInBtn');
+            btn.disabled = true;
+            btn.innerText = "Signing In...";
+
+            try {
+                const res = await fetch('/api/telegram-auth/sign-in', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ code: code, password: password })
+                });
+                const data = await res.json();
+                if (!res.ok) alert(data.message || 'Sign in failed.');
+                else if (data.status === "2fa_required") {
+                    alert(data.message);
+                    document.getElementById('cfgPassword').focus();
+                } else {
+                    alert(`Successfully logged in as ${data.user}!`);
+                    closeSettingsModal();
+                    checkTelegramAuth();
+                }
+            } catch (e) {
+                alert('Sign in error: ' + e);
+            } finally {
+                btn.disabled = false;
+                btn.innerText = "Complete Sign In";
+            }
+        }
+
+        async function performLogout() {
+            if (!confirm('Log out from Telegram? This will revoke the active session and remove saved credentials from this browser.')) {
+                return;
+            }
+
+            try {
+                const res = await fetch('/api/telegram-auth/logout', { method: 'POST' });
+                const data = await res.json();
+                alert(data.message || 'Logged out successfully.');
+
+                document.getElementById('cfgApiId').value = '';
+                document.getElementById('cfgApiId').placeholder = 'API ID (e.g. 1234567)';
+                document.getElementById('cfgApiHash').value = '';
+                document.getElementById('cfgPhone').value = '';
+                document.getElementById('cfgCode').value = '';
+                document.getElementById('cfgPassword').value = '';
+                document.getElementById('otpSection').classList.add('hidden');
+                
+                scannedItems = [];
+                completedIds = [];
+                activeId = null;
+                document.getElementById('queueSection').classList.add('hidden');
+                document.getElementById('itemsList').innerHTML = '';
+                setActionButtonMode('idle');
+
+                closeSettingsModal();
+                checkTelegramAuth();
+            } catch (e) {
+                alert('Logout failed: ' + e);
+            }
+        }
+
         async function browseFolder() {
             const btn = document.getElementById('browseBtn');
             const origHtml = btn.innerHTML;
@@ -182,8 +434,6 @@
                 const data = await res.json();
                 if (data.status === 'ok' && data.path) {
                     document.getElementById('folderInput').value = data.path;
-                } else if (data.status === 'error') {
-                    alert(data.message || 'Could not open folder picker.');
                 }
             } catch (e) {
                 alert('Folder picker request failed: ' + e);
@@ -222,7 +472,6 @@
                 activeId = d.active_id || null;
 
                 updateQueueBadges(d.is_downloading, d.is_paused);
-
                 document.getElementById('logText').innerText = d.log;
                 let nextDelay = 3000;
 
@@ -358,6 +607,12 @@
             const url = document.getElementById('urlInput').value.trim();
             if (!url) return alert('Enter a Telegram URL!');
 
+            const authStatus = await checkTelegramAuth();
+            if (!authStatus.authorized) {
+                openSettingsModal();
+                return alert('Please sign in to Telegram using the Settings dialog first.');
+            }
+
             const btn = document.getElementById('scanBtn');
             btn.disabled = true;
             btn.innerText = "Scanning...";
@@ -373,13 +628,10 @@
                     alert(data.message || 'Scan failed.');
                 } else {
                     scannedItems = data.items;
-                    
-                    // Don't overwrite if user has already set a custom directory
                     const currFolder = document.getElementById('folderInput').value.trim();
                     if (!currFolder || currFolder.startsWith("Lectures_")) {
                         document.getElementById('folderInput').value = data.default_folder;
                     }
-
                     renderQueue();
                     document.getElementById('queueSection').classList.remove('hidden');
                 }

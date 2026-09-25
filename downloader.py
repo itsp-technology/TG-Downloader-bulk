@@ -1,15 +1,14 @@
 import os
 import time
 import asyncio
-from typing import Any, List, Dict
+from typing import Any, List, Dict, Optional
 from telethon import TelegramClient
+from telethon.errors import SessionPasswordNeededError
 from telethon.tl.types import DocumentAttributeVideo
 
-from config import API_ID, API_HASH
-from state import state, prevent_sleep, allow_sleep, DownloadCancelledException
+from config import get_session_dir, get_session_credentials, save_session_credentials, clear_session_storage
+from state import AppState, prevent_sleep, allow_sleep, DownloadCancelledException
 from utils import sanitize_filename, format_seconds, parse_telegram_url
-
-client: Any = TelegramClient('telegram_session', API_ID, API_HASH)
 
 try:
     import cryptg
@@ -17,11 +16,144 @@ try:
 except ImportError:
     print("[Warning] cryptg not found: Falling back to pure-Python AES.")
 
-CHUNK_SIZE = 512 * 1024  # 512 KB per MTProto chunk
+CHUNK_SIZE = 512 * 1024
 MAX_PARALLEL_STREAMS = 4
 
-def update_aggregate_progress(total_size: int, stream_progress: List[int], stream_totals: List[int]):
-    """Aggregates all parallel streams into overall speed, ETA, and percentage."""
+class SessionContext:
+    def __init__(self, session_id: str):
+        self.session_id = session_id
+        self.session_dir = get_session_dir(session_id)
+        self.state = AppState(self.session_dir)
+        self.client: Any = None
+
+    async def get_client(self) -> Any:
+        if self.client is None or not self.client.is_connected():
+            api_id, api_hash = get_session_credentials(self.session_id)
+            if not api_id or not api_hash:
+                raise ValueError("Telegram credentials not configured for this session.")
+            
+            session_file = os.path.join(self.session_dir, "telegram.session")
+            self.client = TelegramClient(session_file, api_id, api_hash)
+            await self.client.connect()
+        return self.client
+
+_sessions_pool: Dict[str, SessionContext] = {}
+
+def get_session_ctx(session_id: str) -> SessionContext:
+    if session_id not in _sessions_pool:
+        _sessions_pool[session_id] = SessionContext(session_id)
+    return _sessions_pool[session_id]
+
+async def get_telegram_auth_status(session_id: str) -> dict:
+    ctx = get_session_ctx(session_id)
+    api_id, _ = get_session_credentials(session_id)
+
+    if not api_id:
+        return {
+            "configured": False,
+            "authorized": False,
+            "masked_api_id": "",
+            "user_info": "Not configured"
+        }
+
+    masked_id = f"{str(api_id)[:3]}****" if len(str(api_id)) > 3 else "****"
+
+    try:
+        cl: Any = await ctx.get_client()
+        is_auth = await cl.is_user_authorized()
+        user_info = "Connected"
+        if is_auth:
+            me: Any = await cl.get_me()
+            first_name = getattr(me, "first_name", "") or ""
+            last_name = getattr(me, "last_name", "") or ""
+            name = f"{first_name} {last_name}".strip()
+            uname = getattr(me, "username", None)
+            username = f"(@{uname})" if uname else ""
+            phone = getattr(me, "phone", None)
+            user_info = f"{name} {username}".strip() or str(phone or "Authorized")
+        return {
+            "configured": True,
+            "authorized": is_auth,
+            "masked_api_id": masked_id,
+            "user_info": user_info
+        }
+    except Exception as e:
+        return {
+            "configured": True,
+            "authorized": False,
+            "masked_api_id": masked_id,
+            "user_info": f"Unauthenticated: {str(e)}"
+        }
+
+async def setup_api_credentials(session_id: str, api_id: int, api_hash: str):
+    ctx = get_session_ctx(session_id)
+    cl: Any = ctx.client
+    if cl is not None and hasattr(cl, "is_connected") and cl.is_connected():
+        try:
+            dis = cl.disconnect()
+            if asyncio.iscoroutine(dis):
+                await dis
+        except Exception:
+            pass
+        ctx.client = None
+
+    save_session_credentials(session_id, api_id, api_hash)
+    await ctx.get_client()
+
+async def send_telegram_login_code(session_id: str, phone: str) -> dict:
+    ctx = get_session_ctx(session_id)
+    cl: Any = await ctx.get_client()
+    sent = await cl.send_code_request(phone.strip())
+    ctx.state.auth_phone = phone.strip()
+    ctx.state.phone_code_hash = sent.phone_code_hash
+    return {"status": "ok", "message": f"Verification code sent to {phone}"}
+
+async def complete_telegram_sign_in(session_id: str, code: str, password: str = "") -> dict:
+    ctx = get_session_ctx(session_id)
+    cl: Any = await ctx.get_client()
+    if not ctx.state.auth_phone or not ctx.state.phone_code_hash:
+        raise ValueError("Please request a login code first.")
+
+    try:
+        await cl.sign_in(
+            phone=ctx.state.auth_phone,
+            code=code.strip(),
+            phone_code_hash=ctx.state.phone_code_hash
+        )
+    except SessionPasswordNeededError:
+        if not password:
+            return {"status": "2fa_required", "message": "Two-Factor Authentication (2FA) password required."}
+        await cl.sign_in(password=password.strip())
+
+    me: Any = await cl.get_me()
+    first_name = getattr(me, "first_name", "") or ""
+    last_name = getattr(me, "last_name", "") or ""
+    name = f"{first_name} {last_name}".strip() or "Telegram User"
+    return {"status": "ok", "user": name}
+
+async def logout_telegram_session(session_id: str):
+    """Officially terminates MTProto session with Telegram and wipes local files."""
+    ctx = get_session_ctx(session_id)
+    cl: Any = ctx.client
+    if cl is not None:
+        try:
+            if hasattr(cl, "is_connected") and cl.is_connected():
+                if await cl.is_user_authorized():
+                    await cl.log_out()
+                else:
+                    dis = cl.disconnect()
+                    if asyncio.iscoroutine(dis):
+                        await dis
+        except Exception:
+            pass
+        ctx.client = None
+
+    ctx.state.reset()
+    clear_session_storage(session_id)
+    if session_id in _sessions_pool:
+        del _sessions_pool[session_id]
+
+def update_aggregate_progress(state: AppState, total_size: int, stream_progress: List[int], stream_totals: List[int]):
     now = time.time()
     dt = now - state.last_time
     total_downloaded = sum(stream_progress)
@@ -42,7 +174,6 @@ def update_aggregate_progress(total_size: int, stream_progress: List[int], strea
         state.downloaded_mb = total_downloaded // (1024 * 1024)
         state.total_mb = total_size // (1024 * 1024)
 
-    # Update individual stream progress for UI representation
     stream_data = []
     for idx, (curr, tot) in enumerate(zip(stream_progress, stream_totals), start=1):
         pct = round((curr / tot) * 100, 1) if tot > 0 else 0.0
@@ -55,6 +186,8 @@ def update_aggregate_progress(total_size: int, stream_progress: List[int], strea
     state.streams = stream_data
 
 async def stream_worker(
+    cl: Any,
+    state: AppState,
     worker_idx: int,
     file_entity: Any,
     part_path: str,
@@ -64,28 +197,26 @@ async def stream_worker(
     stream_totals: List[int],
     total_file_size: int
 ):
-    """Downloads one segmented slice of the file in parallel."""
     already_downloaded = 0
     if os.path.exists(part_path):
         cur_size = os.path.getsize(part_path)
         if cur_size >= stream_total_bytes:
             stream_progress[worker_idx] = stream_total_bytes
-            update_aggregate_progress(total_file_size, stream_progress, stream_totals)
+            update_aggregate_progress(state, total_file_size, stream_progress, stream_totals)
             return
 
-        # Align to 512 KB boundary
         already_downloaded = (cur_size // CHUNK_SIZE) * CHUNK_SIZE
         with open(part_path, "r+b") as fp:
             fp.truncate(already_downloaded)
 
     stream_progress[worker_idx] = already_downloaded
-    update_aggregate_progress(total_file_size, stream_progress, stream_totals)
+    update_aggregate_progress(state, total_file_size, stream_progress, stream_totals)
 
     fetch_offset = start_byte + already_downloaded
     mode = "ab" if already_downloaded > 0 else "wb"
 
     with open(part_path, mode) as fp:
-        async for chunk in client.iter_download(
+        async for chunk in cl.iter_download(
             file_entity,
             offset=fetch_offset,
             chunk_size=CHUNK_SIZE,
@@ -98,22 +229,19 @@ async def stream_worker(
             if needed > 0:
                 fp.write(chunk[:needed])
                 stream_progress[worker_idx] += needed
-                update_aggregate_progress(total_file_size, stream_progress, stream_totals)
+                update_aggregate_progress(state, total_file_size, stream_progress, stream_totals)
 
             if stream_progress[worker_idx] >= stream_total_bytes:
                 break
 
-async def download_file_parallel(msg: Any, final_path: str):
-    """Splits file into 4 parallel connection streams, downloads concurrently, and merges."""
+async def download_file_parallel(cl: Any, state: AppState, msg: Any, final_path: str):
     total_size = msg.file.size if msg.file else 0
     file_entity = msg.document if msg.document else msg
 
-    # Already completed verification
     if os.path.exists(final_path):
         if total_size == 0 or os.path.getsize(final_path) == total_size:
             return True
 
-    # Use single connection for files smaller than 8 MB
     num_streams = MAX_PARALLEL_STREAMS if total_size >= 8 * 1024 * 1024 else 1
 
     total_chunks = (total_size + CHUNK_SIZE - 1) // CHUNK_SIZE
@@ -138,14 +266,12 @@ async def download_file_parallel(msg: Any, final_path: str):
     state.last_time = time.time()
     state.last_bytes = 0
 
-    # Initialize stream cards in state for UI display
-    update_aggregate_progress(total_size, stream_progress, stream_totals)
+    update_aggregate_progress(state, total_size, stream_progress, stream_totals)
 
-    # Launch parallel download workers
     worker_tasks = [
         asyncio.create_task(
             stream_worker(
-                i, file_entity, part_paths[i], start_bytes[i],
+                cl, state, i, file_entity, part_paths[i], start_bytes[i],
                 stream_totals[i], stream_progress, stream_totals, total_size
             )
         )
@@ -161,7 +287,6 @@ async def download_file_parallel(msg: Any, final_path: str):
                 t.cancel()
         raise
 
-    # Merge parts into final file
     state.log = "Merging parallel streams..."
     tmp_final = final_path + ".tmp"
     with open(tmp_final, "wb") as outfile:
@@ -259,18 +384,24 @@ def generate_offline_portal(download_dir: str, file_list: List[Dict[str, str]]):
     except Exception as e:
         print(f"[Portal] Failed to create study_index.html: {e}")
 
-async def scan_channel_or_topic(url: str):
-    peer, topic_id = parse_telegram_url(url)
-    state.active_peer = peer
-    state.active_topic = topic_id
-    state.target_url = url.strip()
+async def scan_channel_or_topic(session_id: str, url: str):
+    ctx = get_session_ctx(session_id)
+    cl: Any = await ctx.get_client()
 
-    await client.get_dialogs()
-    raw_entity = await client.get_entity(peer)
+    if not await cl.is_user_authorized():
+        raise PermissionError("Telegram session is not authorized. Please click 'Telegram Account' to log in.")
+
+    peer, topic_id = parse_telegram_url(url)
+    ctx.state.active_peer = peer
+    ctx.state.active_topic = topic_id
+    ctx.state.target_url = url.strip()
+
+    await cl.get_dialogs()
+    raw_entity = await cl.get_entity(peer)
     entity = raw_entity[0] if isinstance(raw_entity, list) else raw_entity
 
     items: List[Dict[str, Any]] = []
-    messages_iter = client.iter_messages(entity, reply_to=topic_id) if topic_id is not None else client.iter_messages(entity)
+    messages_iter = cl.iter_messages(entity, reply_to=topic_id) if topic_id is not None else cl.iter_messages(entity)
 
     async for raw_m in messages_iter:
         msg: Any = raw_m
@@ -297,7 +428,6 @@ async def scan_channel_or_topic(url: str):
         title_candidate = caption.split('\n')[0].strip() if caption else (file_name or f"Lecture_{msg.id}")
         title = sanitize_filename(title_candidate)
         ext = ".pdf" if is_pdf else ".mp4"
-
         clean_filename = f"{title[:40]}{ext}" if not file_name else sanitize_filename(file_name)
 
         items.append({
@@ -310,12 +440,16 @@ async def scan_channel_or_topic(url: str):
         })
 
     items.reverse()
-    state.scanned_items = items
-    state.default_folder = f"Lectures_Topic_{topic_id}" if topic_id else "Lectures_Channel"
-    state.save_to_disk()
-    return items, state.default_folder
+    ctx.state.scanned_items = items
+    ctx.state.default_folder = f"Lectures_Topic_{topic_id}" if topic_id else "Lectures_Channel"
+    ctx.state.save_to_disk()
+    return items, ctx.state.default_folder
 
-async def run_batch_download(selected_ids: List[int], download_dir: str):
+async def run_batch_download(session_id: str, selected_ids: List[int], download_dir: str):
+    ctx = get_session_ctx(session_id)
+    cl: Any = await ctx.get_client()
+    state = ctx.state
+
     state.is_downloading = True
     state.cancel_requested = False
     state.is_paused = False
@@ -327,7 +461,7 @@ async def run_batch_download(selected_ids: List[int], download_dir: str):
 
     try:
         os.makedirs(download_dir, exist_ok=True)
-        raw_entity = await client.get_entity(state.active_peer)
+        raw_entity = await cl.get_entity(state.active_peer)
         entity = raw_entity[0] if isinstance(raw_entity, list) else raw_entity
 
         id_to_meta = {item['id']: item for item in state.scanned_items if item['id'] in selected_ids}
@@ -388,14 +522,13 @@ async def run_batch_download(selected_ids: List[int], download_dir: str):
             state.log = f"[{index}/{total}] Multi-Stream Downloading: {filename}"
             state.save_to_disk()
 
-            raw_msg = await client.get_messages(entity, ids=msg_id)
+            raw_msg = await cl.get_messages(entity, ids=msg_id)
             msg: Any = raw_msg[0] if isinstance(raw_msg, list) else raw_msg
             if not msg:
                 continue
 
             try:
-                # 4-stream concurrent download engine
-                await download_file_parallel(msg, final_path)
+                await download_file_parallel(cl, state, msg, final_path)
             except (DownloadCancelledException, asyncio.CancelledError):
                 state.is_paused = True
                 state.can_resume = True
