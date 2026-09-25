@@ -17,18 +17,21 @@ try:
 except ImportError:
     print("[Warning] cryptg not found: Falling back to pure-Python AES.")
 
-CHUNK_SIZE = 512 * 1024
-MAX_PARALLEL_STREAMS = 4
+CHUNK_SIZE: int = 512 * 1024
+MAX_PARALLEL_STREAMS: int = 4
+
+_active_clients: Dict[str, Any] = {}
+_client_lock = asyncio.Lock()
+_sessions_pool: Dict[str, Any] = {}
 
 class SessionContext:
     def __init__(self, session_id: str):
-        self.session_id = session_id
-        self.session_dir = get_session_dir(session_id)
-        self.state = AppState(self.session_dir)
-        self.client: Any = None
+        self.session_id: str = session_id
+        self.session_dir: str = get_session_dir(session_id)
+        self.state: AppState = AppState(self.session_dir)
 
     def resolve_active_dir(self) -> str:
-        """Allows mobile devices connected over LAN to seamlessly share the active PC login."""
+        """Allows mobile devices over LAN to share the active PC Telegram login."""
         local_session = os.path.join(self.session_dir, "telegram.session")
         local_cred = os.path.join(self.session_dir, "credentials.json")
         if os.path.exists(local_session) and os.path.exists(local_cred):
@@ -43,9 +46,23 @@ class SessionContext:
 
     async def get_client(self) -> Any:
         active_dir = self.resolve_active_dir()
-        if self.client is None or not self.client.is_connected():
+        session_file = os.path.abspath(os.path.join(active_dir, "telegram.session"))
+
+        async with _client_lock:
+            if session_file in _active_clients:
+                cl = _active_clients[session_file]
+                if cl is not None and hasattr(cl, "is_connected") and cl.is_connected():
+                    return cl
+                elif cl is not None:
+                    try:
+                        await cl.connect()
+                        return cl
+                    except Exception:
+                        _active_clients.pop(session_file, None)
+
             cred_file = os.path.join(active_dir, "credentials.json")
-            api_id, api_hash = 0, ""
+            api_id: int = 0
+            api_hash: str = ""
             if os.path.exists(cred_file):
                 import json
                 try:
@@ -57,14 +74,12 @@ class SessionContext:
                     pass
 
             if not api_id or not api_hash:
-                raise ValueError("Telegram credentials not configured. Click 'Telegram Account' at the top to sign in.")
-            
-            session_file = os.path.join(active_dir, "telegram.session")
-            self.client = TelegramClient(session_file, api_id, api_hash)
-            await self.client.connect()
-        return self.client
+                raise ValueError("Telegram credentials not configured. Click 'Telegram Account' at top to sign in.")
 
-_sessions_pool: Dict[str, SessionContext] = {}
+            new_client = TelegramClient(session_file, api_id, api_hash)
+            await new_client.connect()
+            _active_clients[session_file] = new_client
+            return new_client
 
 def get_session_ctx(session_id: str) -> SessionContext:
     if session_id not in _sessions_pool:
@@ -75,7 +90,7 @@ async def get_telegram_auth_status(session_id: str) -> dict:
     ctx = get_session_ctx(session_id)
     active_dir = ctx.resolve_active_dir()
     cred_file = os.path.join(active_dir, "credentials.json")
-    api_id = 0
+    api_id: int = 0
 
     if os.path.exists(cred_file):
         import json
@@ -124,15 +139,18 @@ async def get_telegram_auth_status(session_id: str) -> dict:
 
 async def setup_api_credentials(session_id: str, api_id: int, api_hash: str):
     ctx = get_session_ctx(session_id)
-    cl: Any = ctx.client
-    if cl is not None and hasattr(cl, "is_connected") and cl.is_connected():
-        try:
-            dis = cl.disconnect()
-            if asyncio.iscoroutine(dis):
-                await dis
-        except Exception:
-            pass
-        ctx.client = None
+    active_dir = ctx.resolve_active_dir()
+    session_file = os.path.abspath(os.path.join(active_dir, "telegram.session"))
+
+    async with _client_lock:
+        cl = _active_clients.pop(session_file, None)
+        if cl is not None and hasattr(cl, "is_connected") and cl.is_connected():
+            try:
+                dis = cl.disconnect()
+                if asyncio.iscoroutine(dis):
+                    await dis
+            except Exception:
+                pass
 
     save_session_credentials(session_id, api_id, api_hash)
     await ctx.get_client()
@@ -171,19 +189,21 @@ async def complete_telegram_sign_in(session_id: str, code: str, password: str = 
 async def logout_telegram_session(session_id: str):
     ctx = get_session_ctx(session_id)
     active_dir = ctx.resolve_active_dir()
-    cl: Any = ctx.client
-    if cl is not None:
-        try:
-            if hasattr(cl, "is_connected") and cl.is_connected():
-                if await cl.is_user_authorized():
-                    await cl.log_out()
-                else:
-                    dis = cl.disconnect()
-                    if asyncio.iscoroutine(dis):
-                        await dis
-        except Exception:
-            pass
-        ctx.client = None
+    session_file = os.path.abspath(os.path.join(active_dir, "telegram.session"))
+
+    async with _client_lock:
+        cl = _active_clients.pop(session_file, None)
+        if cl is not None:
+            try:
+                if hasattr(cl, "is_connected") and cl.is_connected():
+                    if await cl.is_user_authorized():
+                        await cl.log_out()
+                    else:
+                        dis = cl.disconnect()
+                        if asyncio.iscoroutine(dis):
+                            await dis
+            except Exception:
+                pass
 
     ctx.state.reset()
     clear_session_storage(os.path.basename(active_dir))
@@ -192,29 +212,32 @@ async def logout_telegram_session(session_id: str):
         del _sessions_pool[session_id]
 
 # ==============================================================================
-# ZERO-DISK PASSTHROUGH STREAM GENERATOR (Direct to Downloads Folder)
+# RESILIENT MULTI-STREAM PIPELINE (Zero Stalling, Chunk Retries, Byte Resume)
 # ==============================================================================
-async def get_file_stream_generator(session_id: str, msg_id: int) -> Tuple[AsyncGenerator[bytes, None], str, int]:
-    """Streams file directly from Telegram to browser. ZERO cloud storage used."""
+async def get_file_stream_generator(
+    session_id: str,
+    msg_id: int,
+    start_byte: int = 0,
+    end_byte: Optional[int] = None
+) -> Tuple[AsyncGenerator[bytes, None], str, int, int, int]:
     ctx = get_session_ctx(session_id)
     cl: Any = await ctx.get_client()
+    st: AppState = ctx.state
 
     if not await cl.is_user_authorized():
-        raise PermissionError("Telegram is not logged in. Click 'Telegram Account' at top to sign in first.")
+        raise PermissionError("Telegram is not logged in. Click 'Telegram Account' to sign in first.")
 
-    # Auto-recover peer from active_peer, target_url, or saved state
-    peer = ctx.state.active_peer
+    peer = st.active_peer
     if not peer:
-        if ctx.state.target_url:
-            peer, _ = parse_telegram_url(ctx.state.target_url)
-            ctx.state.active_peer = peer
+        if st.target_url:
+            peer, _ = parse_telegram_url(st.target_url)
+            st.active_peer = peer
         else:
-            ctx.state.load_from_disk()
-            if ctx.state.target_url:
-                peer, _ = parse_telegram_url(ctx.state.target_url)
-                ctx.state.active_peer = peer
+            st.load_from_disk()
+            if st.target_url:
+                peer, _ = parse_telegram_url(st.target_url)
+                st.active_peer = peer
 
-    # Check shared session state if mobile connected to host
     if not peer:
         active_dir = ctx.resolve_active_dir()
         state_file = os.path.join(active_dir, "downloads_state.json")
@@ -225,7 +248,7 @@ async def get_file_stream_generator(session_id: str, msg_id: int) -> Tuple[Async
                     t_url = json.load(f).get("target_url", "")
                     if t_url:
                         peer, _ = parse_telegram_url(t_url)
-                        ctx.state.active_peer = peer
+                        st.active_peer = peer
             except Exception:
                 pass
 
@@ -241,7 +264,16 @@ async def get_file_stream_generator(session_id: str, msg_id: int) -> Tuple[Async
         raise ValueError("Lecture file not found or has no media attached.")
 
     file_entity = msg.document if msg.document else msg
-    file_size = msg.file.size or 0
+    resolved_total_size: int = int(msg.file.size or 0)
+
+    resolved_end: int
+    if end_byte is None or end_byte >= resolved_total_size:
+        resolved_end = max(0, resolved_total_size - 1)
+    else:
+        resolved_end = int(end_byte)
+
+    resolved_start: int = max(0, min(int(start_byte), resolved_end))
+    stream_content_length: int = (resolved_end - resolved_start) + 1 if resolved_total_size > 0 else 0
 
     is_pdf = bool(msg.document and msg.document.mime_type == 'application/pdf')
     ext = ".pdf" if is_pdf else ".mp4"
@@ -257,18 +289,159 @@ async def get_file_stream_generator(session_id: str, msg_id: int) -> Tuple[Async
         if not file_name.lower().endswith(('.mp4', '.pdf', '.mkv', '.avi')):
             file_name += ext
 
-    async def stream_chunks():
-        async for chunk in cl.iter_download(
-            file_entity,
-            chunk_size=CHUNK_SIZE,
-            request_size=CHUNK_SIZE
-        ):
-            yield chunk
+    # Initialize live monitors
+    st.active_id = msg_id
+    st.current_file = file_name
+    st.total_mb = resolved_total_size // (1024 * 1024)
+    st.downloaded_mb = resolved_start // (1024 * 1024)
+    st.percent = round((resolved_start / resolved_total_size) * 100, 1) if resolved_total_size > 0 else 0.0
+    st.speed_mbps = 0.0
+    st.eta_str = "--:--"
+    st.device_active_done = False
+    st.is_downloading = True
+    st.is_paused = False
+    st.can_resume = False
+    st.save_to_disk()
+    prevent_sleep()
 
-    return stream_chunks(), file_name, file_size
+    async def stream_chunks() -> AsyncGenerator[bytes, None]:
+        if stream_content_length <= 0:
+            return
+
+        start_chunk_idx: int = resolved_start // CHUNK_SIZE
+        end_chunk_idx: int = resolved_end // CHUNK_SIZE
+        total_chunks: int = end_chunk_idx - start_chunk_idx + 1
+
+        num_workers: int = min(MAX_PARALLEL_STREAMS, max(1, total_chunks))
+
+        # Chunk queue and buffer with safe concurrency
+        queue: asyncio.Queue = asyncio.Queue()
+        for idx in range(start_chunk_idx, end_chunk_idx + 1):
+            queue.put_nowait(idx)
+
+        chunks_buffer: Dict[int, bytes] = {}
+        chunk_event = asyncio.Event()
+        worker_bytes: List[int] = [0] * num_workers
+        worker_expected: List[int] = [
+            (total_chunks // num_workers + (1 if w < (total_chunks % num_workers) else 0)) * CHUNK_SIZE
+            for w in range(num_workers)
+        ]
+
+        async def fetch_single_chunk(offset: int) -> bytes:
+            """Fetches one discrete chunk with up to 3 automatic retries on network drops."""
+            for attempt in range(3):
+                try:
+                    data = b""
+                    async for part in cl.iter_download(
+                        file_entity,
+                        offset=offset,
+                        chunk_size=CHUNK_SIZE,
+                        request_size=CHUNK_SIZE
+                    ):
+                        data += part
+                        if len(data) >= CHUNK_SIZE:
+                            break
+                    if data:
+                        return data
+                except Exception:
+                    if attempt == 2:
+                        raise
+                    await asyncio.sleep(0.4 * (attempt + 1))
+            return b""
+
+        async def worker_loop(w_idx: int):
+            while not queue.empty() and not st.cancel_requested:
+                try:
+                    c_idx = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+
+                try:
+                    chunk_data = await fetch_single_chunk(c_idx * CHUNK_SIZE)
+                    chunks_buffer[c_idx] = chunk_data
+                    worker_bytes[w_idx] += len(chunk_data)
+                    chunk_event.set()
+                except Exception:
+                    # Put back on failure to retry
+                    queue.put_nowait(c_idx)
+                    await asyncio.sleep(0.5)
+
+        workers = [asyncio.create_task(worker_loop(i)) for i in range(num_workers)]
+
+        last_time = time.time()
+        last_bytes = resolved_start
+        yielded_bytes = 0
+        first_chunk_skip = resolved_start % CHUNK_SIZE
+
+        try:
+            for c_idx in range(start_chunk_idx, end_chunk_idx + 1):
+                # Wait for sequential chunk
+                while c_idx not in chunks_buffer:
+                    if st.cancel_requested:
+                        raise DownloadCancelledException("Download paused by user.")
+
+                    chunk_event.clear()
+                    try:
+                        await asyncio.wait_for(chunk_event.wait(), timeout=15.0)
+                    except asyncio.TimeoutError:
+                        if st.cancel_requested:
+                            raise DownloadCancelledException("Download paused by user.")
+
+                raw_chunk = chunks_buffer.pop(c_idx)
+
+                if c_idx == start_chunk_idx and first_chunk_skip > 0:
+                    raw_chunk = raw_chunk[first_chunk_skip:]
+
+                remaining_needed = stream_content_length - yielded_bytes
+                if len(raw_chunk) > remaining_needed:
+                    raw_chunk = raw_chunk[:remaining_needed]
+
+                yield raw_chunk
+                yielded_bytes += len(raw_chunk)
+
+                current_total = resolved_start + yielded_bytes
+                now = time.time()
+                dt = now - last_time
+
+                if dt >= 0.7 or yielded_bytes >= stream_content_length:
+                    speed = ((current_total - last_bytes) / dt) / (1024 * 1024) if dt > 0 else 0.0
+                    st.speed_mbps = round(speed, 2)
+                    rem = max(0, resolved_total_size - current_total)
+                    st.eta_str = format_seconds(rem / (speed * 1024 * 1024)) if speed > 0 else "--:--"
+                    last_time = now
+                    last_bytes = current_total
+
+                    if resolved_total_size > 0:
+                        st.percent = round((current_total / resolved_total_size) * 100, 1)
+                        st.downloaded_mb = current_total // (1024 * 1024)
+
+                    st.streams = [
+                        {
+                            "id": w + 1,
+                            "percent": min(100.0, round((worker_bytes[w] / max(1, worker_expected[w])) * 100, 1)),
+                            "downloaded_mb": round(worker_bytes[w] / (1024 * 1024), 1),
+                            "total_mb": round(worker_expected[w] / (1024 * 1024), 1)
+                        }
+                        for w in range(num_workers)
+                    ]
+
+            if (resolved_start + yielded_bytes) >= resolved_total_size:
+                st.device_active_done = True
+                if msg_id not in st.completed_ids:
+                    st.completed_ids.append(msg_id)
+                st.percent = 100.0
+                st.save_to_disk()
+
+        finally:
+            for w in workers:
+                if not w.done():
+                    w.cancel()
+            allow_sleep()
+
+    return stream_chunks(), file_name, resolved_total_size, resolved_start, resolved_end
 
 # ==============================================================================
-# STANDARD PARALLEL BATCH ENGINE (For local disk storage)
+# PC LOCAL FOLDER PARALLEL BATCH ENGINE (With Chunk-Level Resume)
 # ==============================================================================
 def update_aggregate_progress(state: AppState, total_size: int, stream_progress: List[int], stream_totals: List[int]):
     now = time.time()
@@ -545,6 +718,7 @@ async def scan_channel_or_topic(session_id: str, url: str):
         title_candidate = caption.split('\n')[0].strip() if caption else (file_name or f"Lecture_{msg.id}")
         title = sanitize_filename(title_candidate)
         ext = ".pdf" if is_pdf else ".mp4"
+
         clean_filename = f"{title[:40]}{ext}" if not file_name else sanitize_filename(file_name)
 
         items.append({
@@ -567,6 +741,7 @@ async def run_batch_download(session_id: str, selected_ids: List[int], download_
     cl: Any = await ctx.get_client()
     state = ctx.state
 
+    state.mode = "server"
     state.is_downloading = True
     state.cancel_requested = False
     state.is_paused = False

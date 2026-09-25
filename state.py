@@ -8,7 +8,7 @@ ES_CONTINUOUS = 0x80000000
 ES_SYSTEM_REQUIRED = 0x00000001
 
 def prevent_sleep():
-    """Tells Windows not to sleep while a download is active."""
+    """Prevents system sleep while downloads are running."""
     if sys.platform == "win32":
         try:
             ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
@@ -16,7 +16,7 @@ def prevent_sleep():
             pass
 
 def allow_sleep():
-    """Restores default system sleep timers."""
+    """Restores default system sleep behavior."""
     if sys.platform == "win32":
         try:
             ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
@@ -28,13 +28,14 @@ class DownloadCancelledException(Exception):
 
 class AppState:
     def __init__(self, storage_dir: str):
-        self.storage_dir = storage_dir
-        self.state_file = os.path.join(storage_dir, "downloads_state.json")
+        self.storage_dir: str = storage_dir
+        self.state_file: str = os.path.join(storage_dir, "downloads_state.json")
 
         self.is_downloading: bool = False
         self.cancel_requested: bool = False
         self.can_resume: bool = False
         self.is_paused: bool = False
+        self.mode: str = "server"  # 'server' or 'device'
         
         self.current_file: str = ""
         self.current_index: int = 0
@@ -46,9 +47,15 @@ class AppState:
         self.eta_str: str = "--:--"
         self.log: str = "Ready."
         
+        # Trackers
         self.completed_ids: List[int] = []
         self.active_id: Optional[int] = None
         self.streams: List[Dict[str, Any]] = []
+
+        # Device sequential batch queue
+        self.device_queue: List[int] = []
+        self.device_queue_index: int = 0
+        self.device_active_done: bool = False
 
         self.auth_phone: str = ""
         self.phone_code_hash: str = ""
@@ -87,7 +94,10 @@ class AppState:
                 "completed_ids": self.completed_ids,
                 "active_id": self.active_id,
                 "streams": self.streams,
-                "log": self.log
+                "log": self.log,
+                "mode": self.mode,
+                "device_queue": self.device_queue,
+                "device_queue_index": self.device_queue_index
             }
             with open(self.state_file, "w", encoding="utf-8") as f:
                 json.dump(data, f)
@@ -111,13 +121,15 @@ class AppState:
                     self.completed_ids = data.get("completed_ids", [])
                     self.active_id = data.get("active_id", None)
                     self.streams = data.get("streams", [])
+                    self.mode = data.get("mode", "server")
+                    self.device_queue = data.get("device_queue", [])
+                    self.device_queue_index = data.get("device_queue_index", 0)
                     if self.can_resume:
                         self.log = f"Paused at [{self.current_index}/{self.total_files}]. Click 'Resume Download' to continue."
             except Exception:
                 pass
 
     def reset(self):
-        """Wipes active session state."""
         self.is_downloading = False
         self.can_resume = False
         self.is_paused = False
@@ -133,6 +145,9 @@ class AppState:
         self.completed_ids = []
         self.active_id = None
         self.streams = []
+        self.device_queue = []
+        self.device_queue_index = 0
+        self.device_active_done = False
         self.auth_phone = ""
         self.phone_code_hash = ""
         self.target_url = ""

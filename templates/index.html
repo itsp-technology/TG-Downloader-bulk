@@ -70,7 +70,7 @@
                 <div class="flex items-center justify-between text-[11px] font-semibold text-slate-400">
                     <span class="flex items-center gap-2 text-indigo-400">
                         <span class="w-2 h-2 rounded-full bg-indigo-500 animate-pulse"></span>
-                        Parallel Connection Streams (VidMate / IDM Engine)
+                        Parallel Connection Streams (IDM / VidMate Engine)
                     </span>
                     <span class="text-[10px] text-slate-500 font-mono">4 Sockets Active</span>
                 </div>
@@ -88,27 +88,36 @@
             </div>
         </div>
 
-        <!-- Discovered Lectures & Materials Checklist -->
+        <!-- Discovered Lectures Checklist -->
         <div id="queueSection" class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4 hidden">
             
+            <div id="mobileStorageNotice" class="p-3 bg-emerald-950/40 border border-emerald-800/50 rounded-xl text-xs text-emerald-300 flex items-center gap-2.5 hidden">
+                <span class="text-lg">📲</span>
+                <span class="text-[11px] text-slate-200">
+                    <b>Mobile Direct Download:</b> Downloads save directly into your phone's <b>Downloads folder</b> one after another. <b>Zero files saved on the server.</b>
+                </span>
+            </div>
+
             <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-4">
                 <div>
                     <h2 class="text-base font-bold text-white">Discovered Lectures & Materials</h2>
                     <p class="text-xs text-slate-400" id="queueSummary">Select lectures to download.</p>
                 </div>
-                <!-- Server Batch Download Controls -->
+
                 <div class="flex items-center gap-2 flex-wrap sm:flex-nowrap">
-                    <div class="flex items-center gap-1.5 flex-1 min-w-[200px]">
-                        <input id="folderInput" type="text" placeholder="Server Path (e.g. Downloads)" 
+                    <div id="desktopFolderControls" class="flex items-center gap-1.5 flex-1 min-w-[200px]">
+                        <input id="folderInput" type="text" placeholder="Server Path (e.g. D:\Lectures)" 
                             class="flex-1 px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-200 font-mono focus:outline-none focus:border-blue-500 truncate" />
                         <button id="browseBtn" type="button" onclick="browseFolder()" title="Browse folder on host PC"
                             class="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3 py-2 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer whitespace-nowrap shadow-sm">
                             <span>📁</span> <span>Browse</span>
                         </button>
                     </div>
-                    <button id="startDownloadBtn" onclick="startDownload()" 
-                        class="bg-blue-600 hover:bg-blue-500 text-white font-semibold px-4 py-2 rounded-lg text-xs transition shadow-lg shadow-blue-600/30 cursor-pointer whitespace-nowrap">
-                        Batch Download
+
+                    <button id="startDownloadBtn" onclick="handleBatchDownloadClick()" 
+                        class="bg-blue-600 hover:bg-blue-500 text-white font-semibold px-4 py-2 rounded-lg text-xs transition shadow-lg shadow-blue-600/30 cursor-pointer flex items-center gap-1.5 whitespace-nowrap">
+                        <span id="startBtnIcon">📲</span>
+                        <span id="startBtnText">Batch Download</span>
                     </button>
                 </div>
             </div>
@@ -145,7 +154,6 @@
                 Checking Telegram status...
             </div>
 
-            <!-- Step 1: API ID & Masked API Hash -->
             <div class="space-y-3">
                 <div class="flex justify-between items-center text-xs">
                     <label class="font-bold text-slate-300 uppercase tracking-wider">Step 1: Telegram API Credentials</label>
@@ -156,7 +164,7 @@
                         class="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-200 font-mono focus:outline-none focus:border-blue-500" />
                     
                     <div class="relative">
-                        <input id="cfgApiHash" type="password" placeholder="API Hash (Never exposed to other users)" 
+                        <input id="cfgApiHash" type="password" placeholder="API Hash" 
                             class="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-200 font-mono focus:outline-none focus:border-blue-500 pr-10" />
                         <button type="button" onclick="toggleHashVisibility()" class="absolute right-2.5 top-2 text-xs text-slate-400 hover:text-slate-200 cursor-pointer">
                             👁️
@@ -169,7 +177,6 @@
                 </button>
             </div>
 
-            <!-- Step 2: Phone Login & OTP Verification -->
             <div class="space-y-3 pt-3 border-t border-slate-800">
                 <label class="font-bold text-slate-300 text-xs uppercase tracking-wider block">Step 2: Sign In With Telegram</label>
                 
@@ -196,7 +203,6 @@
                 </div>
             </div>
 
-            <!-- Modal Footer with Logout Action -->
             <div class="flex items-center justify-between pt-3 border-t border-slate-800">
                 <button id="modalLogoutBtn" onclick="performLogout()" 
                     class="bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/30 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer flex items-center gap-1.5 hidden">
@@ -219,8 +225,36 @@
         let pollTimer = null;
         let consecutiveErrors = 0;
         let isPollingActive = true;
+        let currentAppMode = "server";
+
+        function isMobileClient() {
+            return /Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
+                || (window.matchMedia && window.matchMedia("(max-width: 768px)").matches);
+        }
+
+        function adaptUIForDevice() {
+            const isMobile = isMobileClient();
+            const desktopControls = document.getElementById('desktopFolderControls');
+            const mobileNotice = document.getElementById('mobileStorageNotice');
+            const startText = document.getElementById('startBtnText');
+            const startIcon = document.getElementById('startBtnIcon');
+
+            if (isMobile) {
+                if (desktopControls) desktopControls.classList.add('hidden');
+                if (mobileNotice) mobileNotice.classList.remove('hidden');
+                if (startText) startText.innerText = "Batch Download to Mobile";
+                if (startIcon) startIcon.innerText = "📲";
+            } else {
+                if (desktopControls) desktopControls.classList.remove('hidden');
+                if (mobileNotice) mobileNotice.classList.add('hidden');
+                if (startText) startText.innerText = "Batch Download to Folder";
+                if (startIcon) startIcon.innerText = "📁";
+            }
+        }
 
         window.addEventListener('DOMContentLoaded', async () => {
+            adaptUIForDevice();
+            window.addEventListener('resize', adaptUIForDevice);
             await checkTelegramAuth();
 
             try {
@@ -239,6 +273,7 @@
 
                 completedIds = data.completed_ids || [];
                 activeId = data.active_id || null;
+                currentAppMode = data.mode || "server";
 
                 if (data.scanned_items && data.scanned_items.length > 0) {
                     scannedItems = data.scanned_items;
@@ -291,8 +326,26 @@
             }
         }
 
-        // Native Browser Download Trigger: Downloads straight into device's Downloads folder
-        function startDeviceDownload(msgId, filename) {
+        // Clean user-gesture anchor navigation (eliminates Android Chrome insecure download warning)
+        function triggerNativeBrowserDownload(msgId, filename) {
+            const a = document.createElement('a');
+            a.style.display = 'none';
+            a.href = `/api/download-file/${msgId}`;
+            a.setAttribute('download', filename || '');
+            a.setAttribute('target', '_self');
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => {
+                if (document.body.contains(a)) {
+                    document.body.removeChild(a);
+                }
+            }, 2500);
+        }
+
+        function startDeviceDownloadById(msgId) {
+            const item = scannedItems.find(x => x.id === msgId);
+            const filename = item ? item.clean_filename : `Lecture_${msgId}.mp4`;
+
             fetch('/api/telegram-auth/status')
                 .then(res => res.json())
                 .then(data => {
@@ -301,19 +354,68 @@
                         openSettingsModal();
                         return;
                     }
-                    
-                    // Directly trigger browser file download without downloading a .json error file
-                    const downloadUrl = `/api/download-file/${msgId}`;
-                    const a = document.createElement('a');
-                    a.href = downloadUrl;
-                    a.setAttribute('download', filename || `Lecture_${msgId}.mp4`);
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
+                    currentAppMode = "device";
+                    triggerNativeBrowserDownload(msgId, filename);
+                    pollStatus();
                 })
                 .catch(err => {
-                    alert("Network connection error: " + err);
+                    alert("Network error: " + err);
                 });
+        }
+
+        async function handleBatchDownloadClick() {
+            const checked = Array.from(document.querySelectorAll('.item-chk:checked')).map(c => parseInt(c.value));
+            if (checked.length === 0) return alert('Select at least one lecture!');
+
+            const authStatus = await checkTelegramAuth();
+            if (!authStatus.authorized) {
+                alert("⚠️ Telegram account is not logged in!\nClick 'Telegram Account' at the top to sign in first.");
+                openSettingsModal();
+                return;
+            }
+
+            const folderInputVal = document.getElementById('folderInput') ? document.getElementById('folderInput').value.trim() : '';
+            const isMobile = isMobileClient();
+            const hasCustomLocalPath = folderInputVal && (folderInputVal.includes(':\\') || folderInputVal.startsWith('/'));
+
+            if (isMobile || !hasCustomLocalPath) {
+                try {
+                    const res = await fetch('/api/device-batch/start', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ selected_ids: checked })
+                    });
+                    const d = await res.json();
+                    if (!res.ok) return alert(d.message || 'Error starting mobile batch.');
+
+                    if (d.status === "already_done") {
+                        return alert(d.message);
+                    }
+
+                    currentAppMode = "device";
+                    setActionButtonMode("downloading");
+                    triggerNativeBrowserDownload(d.first_id);
+                    pollStatus();
+                } catch (e) {
+                    alert('Request error: ' + e);
+                }
+            } else {
+                try {
+                    const res = await fetch('/api/start-download', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ selected_ids: checked, folder_name: folderInputVal })
+                    });
+                    const data = await res.json();
+                    if (!res.ok) alert(data.message);
+                    else {
+                        currentAppMode = "server";
+                        pollStatus();
+                    }
+                } catch(e) {
+                    alert('Error: ' + e);
+                }
+            }
         }
 
         function toggleHashVisibility() {
@@ -496,10 +598,19 @@
 
                 completedIds = d.completed_ids || [];
                 activeId = d.active_id || null;
+                currentAppMode = d.mode || "server";
 
                 updateQueueBadges(d.is_downloading, d.is_paused);
                 document.getElementById('logText').innerText = d.log;
                 let nextDelay = 3000;
+
+                if (d.mode === "device" && d.is_downloading && d.device_active_done && d.next_id) {
+                    d.device_active_done = false;
+                    document.getElementById('logText').innerText = `Finished current lecture. Starting next: #${d.next_id}...`;
+                    triggerNativeBrowserDownload(d.next_id);
+                    scheduleNextPoll(1200);
+                    return;
+                }
 
                 if (d.is_downloading) {
                     nextDelay = 1000;
@@ -523,7 +634,11 @@
 
                     if (d.can_resume || d.is_paused) {
                         setActionButtonMode("paused");
-                    } else if (d.total_files > 0 && d.current_index === d.total_files) {
+                        if (d.percent > 0) {
+                            document.getElementById('progressBar').style.width = `${d.percent}%`;
+                            document.getElementById('sizeDetails').innerText = `${d.downloaded_mb} MB / ${d.total_mb} MB (${d.percent}%)`;
+                        }
+                    } else if (d.total_files > 0 && d.current_index === d.total_files && !d.next_id) {
                         const btn = document.getElementById('actionBtn');
                         btn.disabled = true;
                         btn.innerText = "Completed";
@@ -585,7 +700,7 @@
                 btn.disabled = false;
                 btn.innerText = "⏹ Stop Download";
                 btn.className = "bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/30 px-4 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer";
-                badge.innerText = "Downloading...";
+                badge.innerText = currentAppMode === "device" ? "Saving to Device..." : "Downloading...";
                 badge.className = "px-3 py-1 rounded-full text-xs font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/30";
             } else if (mode === "paused") {
                 btn.disabled = false;
@@ -609,6 +724,7 @@
                 btn.innerText = "Pausing...";
                 await fetch('/api/cancel', { method: 'POST' });
                 setActionButtonMode("paused");
+                pollStatus();
             } else if (currentMode === "paused") {
                 const btn = document.getElementById('actionBtn');
                 btn.disabled = true;
@@ -620,6 +736,9 @@
                         alert(data.message || 'Failed to resume.');
                         setActionButtonMode("paused");
                     } else {
+                        if (data.mode === "device" && data.next_id) {
+                            triggerNativeBrowserDownload(data.next_id);
+                        }
                         pollStatus();
                     }
                 } catch(e) {
@@ -654,9 +773,12 @@
                     alert(data.message || 'Scan failed.');
                 } else {
                     scannedItems = data.items;
-                    const currFolder = document.getElementById('folderInput').value.trim();
-                    if (!currFolder || currFolder.startsWith("Lectures_")) {
-                        document.getElementById('folderInput').value = data.default_folder;
+                    const folderEl = document.getElementById('folderInput');
+                    if (folderEl) {
+                        const currFolder = folderEl.value.trim();
+                        if (!currFolder || currFolder.startsWith("Lectures_")) {
+                            folderEl.value = data.default_folder;
+                        }
                     }
                     renderQueue();
                     document.getElementById('queueSection').classList.remove('hidden');
@@ -692,8 +814,7 @@
                         <span>${item.duration || ''}</span>
                         <span>${item.size_mb} MB</span>
                         
-                        <!-- Direct to Downloads Folder button for Mobile / PC -->
-                        <button type="button" onclick="startDeviceDownload(${item.id}, '${item.clean_filename.replace(/'/g, "\\'")}')"
+                        <button type="button" onclick="startDeviceDownloadById(${item.id})"
                            class="bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 px-3 py-1.5 rounded-lg text-xs font-sans font-semibold transition flex items-center gap-1 cursor-pointer whitespace-nowrap shadow-sm">
                            <span>📥</span> <span>Download</span>
                         </button>
@@ -712,7 +833,7 @@
                 if (!badge) return;
 
                 if (completedIds.includes(item.id)) {
-                    badge.innerText = "✓ Server Saved";
+                    badge.innerText = "✓ Done";
                     badge.className = "px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30";
                 } else if (activeId === item.id) {
                     if (isDownloading) {
@@ -743,26 +864,6 @@
                 const chk = el.querySelector('.item-chk');
                 if (chk) chk.checked = isChecked;
             });
-        }
-
-        async function startDownload() {
-            const checked = Array.from(document.querySelectorAll('.item-chk:checked')).map(c => parseInt(c.value));
-            if (checked.length === 0) return alert('Select at least one lecture!');
-
-            const folder = document.getElementById('folderInput').value.trim() || 'Downloads';
-
-            try {
-                const res = await fetch('/api/start-download', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ selected_ids: checked, folder_name: folder })
-                });
-                const data = await res.json();
-                if (!res.ok) alert(data.message);
-                else pollStatus();
-            } catch(e) {
-                alert('Error: ' + e);
-            }
         }
     </script>
 </body>
