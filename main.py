@@ -294,12 +294,15 @@ async def handle_status(sid: str = Depends(resolve_session_id)):
         "log": st.log
     }
 
+# ==============================================================================
+# SERVER ENTRY POINT (DYNAMIC CLOUD PORT & LOCAL COMPATIBILITY)
+# ==============================================================================
 if __name__ == "__main__":
     import uvicorn
+    # Render assigns a dynamic port via the PORT environment variable; falls back to 8000 locally
+    port = int(os.environ.get("PORT", 8000))
     print("\n" + "=" * 65)
-    print(" [FastAPI Server Started - Multi-User Isolated Sessions]")
-    print(" Local Machine Access: http://127.0.0.1:8000")
-    print(" LAN / Wi-Fi Access:   http://192.168.1.2:8000")
-    print(" Speed Test Page:      http://192.168.1.2:8000/speedtest")
+    print(f" [FastAPI Server Started on Port {port}]")
+    print(f" Local / LAN Access: http://0.0.0.0:{port}")
     print("=" * 65 + "\n")
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)

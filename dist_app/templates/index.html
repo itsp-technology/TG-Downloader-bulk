@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lecture Downloader & Offline Study Hub</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen p-6 font-sans">
+    <div class="max-w-4xl mx-auto space-y-6">
+        
+        <!-- Header -->
+        <div class="flex items-center justify-between border-b border-slate-800 pb-5">
+            <div>
+                <h1 class="text-2xl font-bold tracking-tight text-white flex items-center gap-2">
+                    <span class="p-2 bg-blue-600 rounded-lg text-lg">⚡</span> Batch Lecture Studio
+                </h1>
+                <p class="text-slate-400 text-xs mt-1">Multi-stream parallel lecture downloader with pause/resume and offline player.</p>
+            </div>
+            <div class="flex items-center gap-2 sm:gap-3 flex-wrap justify-end">
+                <button onclick="openSettingsModal()" id="tgStatusBtn" 
+                    class="bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700 px-3 py-1.5 rounded-full text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer shadow-sm">
+                    <span id="tgDot" class="w-2 h-2 rounded-full bg-amber-500"></span>
+                    <span id="tgUserLabel">Telegram Account</span>
+                </button>
+
+                <a href="/speedtest" class="bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 px-3 py-1.5 rounded-full text-xs font-semibold transition flex items-center gap-1.5 shadow-sm">
+                    <span>🚀</span> Speed Test
+                </a>
+                <div id="liveBadge" class="px-3 py-1.5 rounded-full text-xs font-semibold bg-slate-800 text-slate-300">Idle</div>
+            </div>
+        </div>
+
+        <!-- URL Input Card -->
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl space-y-4">
+            <label class="text-xs font-bold text-slate-300 uppercase tracking-wider">Telegram Topic or Channel URL</label>
+            <div class="flex gap-2">
+                <input id="urlInput" type="text" placeholder="https://t.me/c/2293028281/37178 or https://t.me/Gate_cse_2026/620" 
+                    class="flex-1 px-4 py-3 rounded-xl bg-slate-950 border border-slate-700 text-slate-200 focus:outline-none focus:border-blue-500 font-mono text-sm" />
+                <button id="scanBtn" onclick="scanTopic()" 
+                    class="bg-blue-600 hover:bg-blue-500 font-semibold px-6 py-3 rounded-xl transition flex items-center gap-2 text-sm shadow-lg shadow-blue-600/30 cursor-pointer">
+                    Scan Lectures
+                </button>
+            </div>
+        </div>
+
+        <!-- Active Download Monitor Card -->
+        <div id="monitorCard" class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
+            <div class="flex justify-between items-center text-sm">
+                <span id="monFile" class="font-medium text-slate-200 truncate max-w-[420px]">Ready to scan</span>
+                <span id="monCounter" class="font-mono text-xs text-slate-400">0 / 0 Files</span>
+            </div>
+
+            <!-- Master Progress Bar -->
+            <div class="space-y-1">
+                <div class="w-full bg-slate-950 h-3 rounded-full overflow-hidden border border-slate-800">
+                    <div id="progressBar" class="bg-gradient-to-r from-blue-600 to-indigo-500 h-full transition-all duration-300 w-0"></div>
+                </div>
+                <div class="flex justify-between text-[11px] font-mono text-slate-400 pt-1">
+                    <span id="sizeDetails">0 MB / 0 MB (0%)</span>
+                    <div class="flex gap-4">
+                        <span id="speedMeter">0.0 MB/s</span>
+                        <span id="etaMeter">ETA: --:--</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Multi-Stream Visual Indicator (VidMate / IDM Engine) -->
+            <div id="streamsContainer" class="space-y-2 pt-3 border-t border-slate-800/80 hidden">
+                <div class="flex items-center justify-between text-[11px] font-semibold text-slate-400">
+                    <span class="flex items-center gap-2 text-indigo-400">
+                        <span class="w-2 h-2 rounded-full bg-indigo-500 animate-pulse"></span>
+                        Parallel Connection Streams (VidMate / IDM Engine)
+                    </span>
+                    <span class="text-[10px] text-slate-500 font-mono">4 Sockets Active</span>
+                </div>
+                <div id="streamsList" class="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1"></div>
+            </div>
+
+            <div class="flex justify-between items-center border-t border-slate-800/80 pt-4">
+                <p id="logText" class="text-xs text-blue-400 font-mono truncate max-w-[460px]">Idle</p>
+                <div class="flex items-center gap-2">
+                    <button id="actionBtn" onclick="handleActionClick()" disabled
+                        class="bg-slate-800 text-slate-500 px-4 py-1.5 rounded-lg text-xs font-semibold transition cursor-not-allowed">
+                        Stop Download
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Discovered Lectures & Materials Checklist -->
+        <div id="queueSection" class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4 hidden">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-4">
+                <div>
+                    <h2 class="text-base font-bold text-white">Discovered Lectures & Materials</h2>
+                    <p class="text-xs text-slate-400" id="queueSummary">Select lectures to download.</p>
+                </div>
+                <!-- Folder Input + Browse Button + Download Action -->
+                <div class="flex items-center gap-2 flex-wrap sm:flex-nowrap">
+                    <div class="flex items-center gap-1.5 flex-1 min-w-[240px]">
+                        <input id="folderInput" type="text" placeholder="Download Path (e.g. D:\Lectures)" 
+                            class="flex-1 px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-200 font-mono focus:outline-none focus:border-blue-500 truncate" />
+                        <button id="browseBtn" type="button" onclick="browseFolder()" title="Browse folder on your PC"
+                            class="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3 py-2 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer whitespace-nowrap shadow-sm">
+                            <span>📁</span> <span>Browse</span>
+                        </button>
+                    </div>
+                    <button id="startDownloadBtn" onclick="startDownload()" 
+                        class="bg-blue-600 hover:bg-blue-500 text-white font-semibold px-4 py-2 rounded-lg text-xs transition shadow-lg shadow-blue-600/30 cursor-pointer whitespace-nowrap">
+                        Download Selected
+                    </button>
+                </div>
+            </div>
+
+            <div class="flex justify-between items-center text-xs text-slate-400 pb-2">
+                <div class="flex gap-3">
+                    <button onclick="toggleAll(true)" class="hover:text-white underline">Select All</button>
+                    <button onclick="toggleAll(false)" class="hover:text-white underline">Deselect All</button>
+                </div>
+                <div class="flex items-center gap-4">
+                    <label class="flex items-center gap-1.5 cursor-pointer">
+                        <input id="filterPdf" type="checkbox" checked onchange="filterType('pdf', this.checked)" class="rounded bg-slate-950 border-slate-700">
+                        <span>Include Notes (PDFs)</span>
+                    </label>
+                </div>
+            </div>
+
+            <div class="max-h-[380px] overflow-y-auto space-y-1.5 pr-1" id="itemsList"></div>
+        </div>
+
+    </div>
+
+    <!-- Telegram API & Account Login Modal -->
+    <div id="settingsModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 hidden">
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl max-w-lg w-full p-6 shadow-2xl space-y-5">
+            <div class="flex items-center justify-between border-b border-slate-800 pb-4">
+                <h3 class="text-base font-bold text-white flex items-center gap-2">
+                    <span>⚙️</span> Telegram Private Session & Login
+                </h3>
+                <button onclick="closeSettingsModal()" class="text-slate-400 hover:text-white text-lg font-bold">&times;</button>
+            </div>
+
+            <div id="modalStatusBanner" class="p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs font-mono text-slate-300">
+                Checking Telegram status...
+            </div>
+
+            <!-- Step 1: API ID & Masked API Hash -->
+            <div class="space-y-3">
+                <div class="flex justify-between items-center text-xs">
+                    <label class="font-bold text-slate-300 uppercase tracking-wider">Step 1: Telegram API Credentials</label>
+                    <a href="https://my.telegram.org" target="_blank" class="text-blue-400 hover:underline">Get from my.telegram.org ↗</a>
+                </div>
+                <div class="space-y-2">
+                    <input id="cfgApiId" type="number" placeholder="API ID (e.g. 1234567)" 
+                        class="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-200 font-mono focus:outline-none focus:border-blue-500" />
+                    
+                    <div class="relative">
+                        <input id="cfgApiHash" type="password" placeholder="API Hash (Never exposed to other users)" 
+                            class="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-200 font-mono focus:outline-none focus:border-blue-500 pr-10" />
+                        <button type="button" onclick="toggleHashVisibility()" class="absolute right-2.5 top-2 text-xs text-slate-400 hover:text-slate-200 cursor-pointer">
+                            👁️
+                        </button>
+                    </div>
+                </div>
+                <button onclick="saveApiCredentials()" 
+                    class="w-full bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold py-2 rounded-lg text-xs transition cursor-pointer">
+                    Save API Credentials to Session
+                </button>
+            </div>
+
+            <!-- Step 2: Phone Login & OTP Verification -->
+            <div class="space-y-3 pt-3 border-t border-slate-800">
+                <label class="font-bold text-slate-300 text-xs uppercase tracking-wider block">Step 2: Sign In With Telegram</label>
+                
+                <div class="flex gap-2">
+                    <input id="cfgPhone" type="text" placeholder="Phone Number (e.g. +919876543210)" 
+                        class="flex-1 px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-200 font-mono focus:outline-none focus:border-blue-500" />
+                    <button id="sendCodeBtn" onclick="sendLoginCode()" 
+                        class="bg-blue-600 hover:bg-blue-500 text-white font-semibold px-4 py-2 rounded-lg text-xs transition cursor-pointer whitespace-nowrap">
+                        Send OTP
+                    </button>
+                </div>
+
+                <div id="otpSection" class="space-y-2 hidden">
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <input id="cfgCode" type="text" placeholder="Telegram OTP Code" 
+                            class="px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-200 font-mono focus:outline-none focus:border-blue-500" />
+                        <input id="cfgPassword" type="password" placeholder="2FA Password (if enabled)" 
+                            class="px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-200 font-mono focus:outline-none focus:border-blue-500" />
+                    </div>
+                    <button id="signInBtn" onclick="submitSignIn()" 
+                        class="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-2 rounded-lg text-xs transition shadow-lg shadow-emerald-600/30 cursor-pointer">
+                        Complete Sign In
+                    </button>
+                </div>
+            </div>
+
+            <!-- Modal Footer with Logout Action -->
+            <div class="flex items-center justify-between pt-3 border-t border-slate-800">
+                <button id="modalLogoutBtn" onclick="performLogout()" 
+                    class="bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/30 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer flex items-center gap-1.5 hidden">
+                    <span>🚪</span> Log Out
+                </button>
+                <div class="flex-1"></div>
+                <button onclick="closeSettingsModal()" 
+                    class="px-4 py-1.5 rounded-lg bg-slate-800 text-slate-300 text-xs font-semibold hover:bg-slate-700 cursor-pointer">
+                    Close
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let scannedItems = [];
+        let completedIds = [];
+        let activeId = null;
+        let currentMode = "idle";
+        let pollTimer = null;
+        let consecutiveErrors = 0;
+        let isPollingActive = true;
+
+        window.addEventListener('DOMContentLoaded', async () => {
+            await checkTelegramAuth();
+
+            try {
+                const res = await fetch('/api/initial-state');
+                const data = await res.json();
+
+                if (data.target_url) document.getElementById('urlInput').value = data.target_url;
+                
+                if (data.download_folder) {
+                    document.getElementById('folderInput').value = data.download_folder;
+                } else if (data.default_folder) {
+                    document.getElementById('folderInput').value = data.default_folder;
+                }
+
+                if (data.log) document.getElementById('logText').innerText = data.log;
+
+                completedIds = data.completed_ids || [];
+                activeId = data.active_id || null;
+
+                if (data.scanned_items && data.scanned_items.length > 0) {
+                    scannedItems = data.scanned_items;
+                    renderQueue();
+                    document.getElementById('queueSection').classList.remove('hidden');
+                }
+
+                if (data.streams && data.streams.length > 1) {
+                    renderStreams(data.streams);
+                }
+
+                if (data.can_resume || data.is_paused) {
+                    setActionButtonMode("paused");
+                }
+            } catch (e) {}
+
+            scheduleNextPoll(1000);
+        });
+
+        async function checkTelegramAuth() {
+            try {
+                const res = await fetch('/api/telegram-auth/status');
+                const data = await res.json();
+                const dot = document.getElementById('tgDot');
+                const label = document.getElementById('tgUserLabel');
+                const banner = document.getElementById('modalStatusBanner');
+                const logoutBtn = document.getElementById('modalLogoutBtn');
+
+                if (data.configured && data.authorized) {
+                    dot.className = "w-2 h-2 rounded-full bg-emerald-500";
+                    label.innerText = data.user_info || "Connected";
+                    banner.innerHTML = `<span class="text-emerald-400 font-bold">✓ Logged In:</span> ${data.user_info}`;
+                    if (data.masked_api_id) document.getElementById('cfgApiId').placeholder = `Active ID: ${data.masked_api_id}`;
+                    logoutBtn.classList.remove('hidden');
+                } else if (data.configured && !data.authorized) {
+                    dot.className = "w-2 h-2 rounded-full bg-amber-500 animate-pulse";
+                    label.innerText = "Login Needed";
+                    banner.innerHTML = `<span class="text-amber-400 font-bold">⚠ Session Not Signed In:</span> Enter phone number below to receive an OTP.`;
+                    if (data.masked_api_id) document.getElementById('cfgApiId').placeholder = `Configured ID: ${data.masked_api_id}`;
+                    logoutBtn.classList.remove('hidden');
+                } else {
+                    dot.className = "w-2 h-2 rounded-full bg-red-500";
+                    label.innerText = "Setup API";
+                    banner.innerHTML = `<span class="text-red-400 font-bold">⚠ Setup Required:</span> Enter your API ID & Hash from my.telegram.org.`;
+                    logoutBtn.classList.add('hidden');
+                }
+                return data;
+            } catch (e) {
+                return { configured: false, authorized: false };
+            }
+        }
+
+        function toggleHashVisibility() {
+            const input = document.getElementById('cfgApiHash');
+            input.type = input.type === 'password' ? 'text' : 'password';
+        }
+
+        function openSettingsModal() {
+            document.getElementById('settingsModal').classList.remove('hidden');
+            checkTelegramAuth();
+        }
+
+        function closeSettingsModal() {
+            document.getElementById('settingsModal').classList.add('hidden');
+        }
+
+        async function saveApiCredentials() {
+            const apiId = document.getElementById('cfgApiId').value.trim();
+            const apiHash = document.getElementById('cfgApiHash').value.trim();
+
+            if (!apiId || !apiHash) return alert('Enter both API ID and API Hash!');
+
+            try {
+                const res = await fetch('/api/telegram-auth/save-credentials', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ api_id: parseInt(apiId), api_hash: apiHash })
+                });
+                const data = await res.json();
+                if (!res.ok) alert(data.message || 'Error saving API credentials.');
+                else {
+                    alert(data.message);
+                    document.getElementById('cfgApiHash').value = '';
+                    checkTelegramAuth();
+                }
+            } catch (e) {
+                alert('Request failed: ' + e);
+            }
+        }
+
+        async function sendLoginCode() {
+            const phone = document.getElementById('cfgPhone').value.trim();
+            if (!phone) return alert('Enter phone number with international country code! (e.g. +91...)');
+
+            const btn = document.getElementById('sendCodeBtn');
+            btn.disabled = true;
+            btn.innerText = "Sending...";
+
+            try {
+                const res = await fetch('/api/telegram-auth/send-code', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ phone: phone })
+                });
+                const data = await res.json();
+                if (!res.ok) alert(data.message || 'Failed to send OTP code.');
+                else {
+                    alert(data.message);
+                    document.getElementById('otpSection').classList.remove('hidden');
+                    document.getElementById('modalStatusBanner').innerHTML = `<span class="text-blue-400 font-bold">OTP Sent:</span> Check your Telegram app for the verification code.`;
+                }
+            } catch (e) {
+                alert('Request error: ' + e);
+            } finally {
+                btn.disabled = false;
+                btn.innerText = "Send OTP";
+            }
+        }
+
+        async function submitSignIn() {
+            const code = document.getElementById('cfgCode').value.trim();
+            const password = document.getElementById('cfgPassword').value.trim();
+
+            if (!code) return alert('Enter the OTP code received in your Telegram app!');
+
+            const btn = document.getElementById('signInBtn');
+            btn.disabled = true;
+            btn.innerText = "Signing In...";
+
+            try {
+                const res = await fetch('/api/telegram-auth/sign-in', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ code: code, password: password })
+                });
+                const data = await res.json();
+                if (!res.ok) alert(data.message || 'Sign in failed.');
+                else if (data.status === "2fa_required") {
+                    alert(data.message);
+                    document.getElementById('cfgPassword').focus();
+                } else {
+                    alert(`Successfully logged in as ${data.user}!`);
+                    closeSettingsModal();
+                    checkTelegramAuth();
+                }
+            } catch (e) {
+                alert('Sign in error: ' + e);
+            } finally {
+                btn.disabled = false;
+                btn.innerText = "Complete Sign In";
+            }
+        }
+
+        async function performLogout() {
+            if (!confirm('Log out from Telegram? This will revoke the active session and remove saved credentials from this browser.')) {
+                return;
+            }
+
+            try {
+                const res = await fetch('/api/telegram-auth/logout', { method: 'POST' });
+                const data = await res.json();
+                alert(data.message || 'Logged out successfully.');
+
+                document.getElementById('cfgApiId').value = '';
+                document.getElementById('cfgApiId').placeholder = 'API ID (e.g. 1234567)';
+                document.getElementById('cfgApiHash').value = '';
+                document.getElementById('cfgPhone').value = '';
+                document.getElementById('cfgCode').value = '';
+                document.getElementById('cfgPassword').value = '';
+                document.getElementById('otpSection').classList.add('hidden');
+                
+                scannedItems = [];
+                completedIds = [];
+                activeId = null;
+                document.getElementById('queueSection').classList.add('hidden');
+                document.getElementById('itemsList').innerHTML = '';
+                setActionButtonMode('idle');
+
+                closeSettingsModal();
+                checkTelegramAuth();
+            } catch (e) {
+                alert('Logout failed: ' + e);
+            }
+        }
+
+        async function browseFolder() {
+            const btn = document.getElementById('browseBtn');
+            const origHtml = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<span>⏳</span> <span>Opening...</span>';
+
+            try {
+                const res = await fetch('/api/browse-folder', { method: 'POST' });
+                const data = await res.json();
+                if (data.status === 'ok' && data.path) {
+                    document.getElementById('folderInput').value = data.path;
+                }
+            } catch (e) {
+                alert('Folder picker request failed: ' + e);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = origHtml;
+            }
+        }
+
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                isPollingActive = false;
+                if (pollTimer) clearTimeout(pollTimer);
+            } else {
+                isPollingActive = true;
+                consecutiveErrors = 0;
+                scheduleNextPoll(1000);
+            }
+        });
+
+        function scheduleNextPoll(delayMs) {
+            if (pollTimer) clearTimeout(pollTimer);
+            if (!isPollingActive) return;
+            pollTimer = setTimeout(pollStatus, delayMs);
+        }
+
+        async function pollStatus() {
+            try {
+                const res = await fetch('/api/status');
+                if (!res.ok) throw new Error("Status endpoint error");
+                
+                const d = await res.json();
+                consecutiveErrors = 0;
+
+                completedIds = d.completed_ids || [];
+                activeId = d.active_id || null;
+
+                updateQueueBadges(d.is_downloading, d.is_paused);
+                document.getElementById('logText').innerText = d.log;
+                let nextDelay = 3000;
+
+                if (d.is_downloading) {
+                    nextDelay = 1000;
+                    setActionButtonMode("downloading");
+                    document.getElementById('monCounter').innerText = `${d.current_index} / ${d.total_files} Files`;
+                    document.getElementById('monFile').innerText = d.current_file;
+                    document.getElementById('progressBar').style.width = `${d.percent}%`;
+                    document.getElementById('sizeDetails').innerText = `${d.downloaded_mb} MB / ${d.total_mb} MB (${d.percent}%)`;
+                    document.getElementById('speedMeter').innerText = `${d.speed_mbps} MB/s`;
+                    document.getElementById('etaMeter').innerText = `ETA: ${d.eta}`;
+
+                    if (d.streams && d.streams.length > 1) {
+                        renderStreams(d.streams);
+                    } else {
+                        document.getElementById('streamsContainer').classList.add('hidden');
+                    }
+                } else {
+                    document.getElementById('speedMeter').innerText = "0.0 MB/s";
+                    document.getElementById('etaMeter').innerText = "ETA: --:--";
+                    document.getElementById('streamsContainer').classList.add('hidden');
+
+                    if (d.can_resume || d.is_paused) {
+                        setActionButtonMode("paused");
+                    } else if (d.total_files > 0 && d.current_index === d.total_files) {
+                        const btn = document.getElementById('actionBtn');
+                        btn.disabled = true;
+                        btn.innerText = "Completed";
+                        btn.className = "bg-slate-800 text-slate-500 px-4 py-1.5 rounded-lg text-xs font-semibold cursor-not-allowed";
+
+                        const badge = document.getElementById('liveBadge');
+                        badge.innerText = "Completed";
+                        badge.className = "px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30";
+                        document.getElementById('progressBar').style.width = '100%';
+                    } else {
+                        setActionButtonMode("idle");
+                    }
+                }
+
+                scheduleNextPoll(nextDelay);
+
+            } catch (err) {
+                consecutiveErrors++;
+                if (consecutiveErrors >= 3) {
+                    const badge = document.getElementById('liveBadge');
+                    badge.innerText = "Server Offline";
+                    badge.className = "px-3 py-1 rounded-full text-xs font-semibold bg-red-500/20 text-red-400 border border-red-500/30";
+                    document.getElementById('logText').innerText = "Server stopped. Restart main.py to reconnect.";
+                    scheduleNextPoll(15000);
+                } else {
+                    scheduleNextPoll(4000);
+                }
+            }
+        }
+
+        function renderStreams(streams) {
+            const container = document.getElementById('streamsContainer');
+            const list = document.getElementById('streamsList');
+            container.classList.remove('hidden');
+            list.innerHTML = '';
+
+            streams.forEach(s => {
+                const item = document.createElement('div');
+                item.className = "p-2 rounded-lg bg-slate-950/70 border border-slate-800 space-y-1";
+                item.innerHTML = `
+                    <div class="flex justify-between items-center text-[10px] font-mono text-slate-300">
+                        <span class="font-semibold text-blue-400">Stream #${s.id}</span>
+                        <span>${s.downloaded_mb} / ${s.total_mb} MB (${s.percent}%)</span>
+                    </div>
+                    <div class="w-full bg-slate-900 h-1.5 rounded-full overflow-hidden">
+                        <div class="bg-gradient-to-r from-blue-500 to-indigo-400 h-full transition-all duration-200" style="width: ${s.percent}%"></div>
+                    </div>
+                `;
+                list.appendChild(item);
+            });
+        }
+
+        function setActionButtonMode(mode) {
+            currentMode = mode;
+            const btn = document.getElementById('actionBtn');
+            const badge = document.getElementById('liveBadge');
+
+            if (mode === "downloading") {
+                btn.disabled = false;
+                btn.innerText = "⏹ Stop Download";
+                btn.className = "bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/30 px-4 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer";
+                badge.innerText = "Downloading...";
+                badge.className = "px-3 py-1 rounded-full text-xs font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/30";
+            } else if (mode === "paused") {
+                btn.disabled = false;
+                btn.innerHTML = "<span>▶</span> Resume Download";
+                btn.className = "bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-1.5 rounded-lg text-xs font-semibold transition shadow-lg shadow-emerald-600/30 cursor-pointer flex items-center gap-1.5";
+                badge.innerText = "Paused";
+                badge.className = "px-3 py-1 rounded-full text-xs font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/30";
+            } else {
+                btn.disabled = true;
+                btn.innerText = "Stop Download";
+                btn.className = "bg-slate-800 text-slate-500 px-4 py-1.5 rounded-lg text-xs font-semibold cursor-not-allowed";
+                badge.innerText = "Idle";
+                badge.className = "px-3 py-1 rounded-full text-xs font-semibold bg-slate-800 text-slate-300";
+            }
+        }
+
+        async function handleActionClick() {
+            if (currentMode === "downloading") {
+                const btn = document.getElementById('actionBtn');
+                btn.disabled = true;
+                btn.innerText = "Pausing...";
+                await fetch('/api/cancel', { method: 'POST' });
+                setActionButtonMode("paused");
+            } else if (currentMode === "paused") {
+                const btn = document.getElementById('actionBtn');
+                btn.disabled = true;
+                btn.innerText = "Resuming...";
+                try {
+                    const res = await fetch('/api/resume', { method: 'POST' });
+                    const data = await res.json();
+                    if (!res.ok) {
+                        alert(data.message || 'Failed to resume.');
+                        setActionButtonMode("paused");
+                    } else {
+                        pollStatus();
+                    }
+                } catch(e) {
+                    alert('Resume error: ' + e);
+                    setActionButtonMode("paused");
+                }
+            }
+        }
+
+        async function scanTopic() {
+            const url = document.getElementById('urlInput').value.trim();
+            if (!url) return alert('Enter a Telegram URL!');
+
+            const authStatus = await checkTelegramAuth();
+            if (!authStatus.authorized) {
+                openSettingsModal();
+                return alert('Please sign in to Telegram using the Settings dialog first.');
+            }
+
+            const btn = document.getElementById('scanBtn');
+            btn.disabled = true;
+            btn.innerText = "Scanning...";
+
+            try {
+                const res = await fetch('/api/scan', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ url: url })
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    alert(data.message || 'Scan failed.');
+                } else {
+                    scannedItems = data.items;
+                    const currFolder = document.getElementById('folderInput').value.trim();
+                    if (!currFolder || currFolder.startsWith("Lectures_")) {
+                        document.getElementById('folderInput').value = data.default_folder;
+                    }
+                    renderQueue();
+                    document.getElementById('queueSection').classList.remove('hidden');
+                }
+            } catch(e) {
+                alert('Server error: ' + e);
+            } finally {
+                btn.disabled = false;
+                btn.innerText = "Scan Lectures";
+            }
+        }
+
+        function renderQueue() {
+            const container = document.getElementById('itemsList');
+            container.innerHTML = '';
+            let totalMB = 0;
+
+            scannedItems.forEach((item, index) => {
+                totalMB += item.size_mb;
+                const row = document.createElement('div');
+                row.className = `flex items-center justify-between p-3 rounded-xl bg-slate-950/60 border border-slate-800/80 text-xs item-row ${item.type}`;
+                row.id = `item-row-${item.id}`;
+                row.innerHTML = `
+                    <div class="flex items-center gap-3 truncate max-w-[550px]">
+                        <input type="checkbox" value="${item.id}" checked class="item-chk rounded bg-slate-900 border-slate-700" />
+                        <span class="font-mono text-slate-500 font-semibold">#${(index + 1).toString().padStart(2, '0')}</span>
+                        <span class="px-1.5 py-0.5 rounded text-[10px] font-bold ${item.type === 'video' ? 'bg-blue-600/20 text-blue-400' : 'bg-red-600/20 text-red-400'}">${item.type.toUpperCase()}</span>
+                        <span id="badge-${item.id}" class="px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-800 text-slate-400">Queued</span>
+                        <span class="text-slate-200 truncate font-medium">${item.title}</span>
+                    </div>
+                    <div class="flex items-center gap-4 text-slate-400 font-mono text-[11px]">
+                        <span>${item.duration || ''}</span>
+                        <span>${item.size_mb} MB</span>
+                    </div>
+                `;
+                container.appendChild(row);
+            });
+
+            document.getElementById('queueSummary').innerText = `${scannedItems.length} lectures found (~${Math.round(totalMB / 1024 * 10) / 10} GB total).`;
+            updateQueueBadges(false, false);
+        }
+
+        function updateQueueBadges(isDownloading, isPaused) {
+            scannedItems.forEach(item => {
+                const badge = document.getElementById(`badge-${item.id}`);
+                if (!badge) return;
+
+                if (completedIds.includes(item.id)) {
+                    badge.innerText = "✓ Done";
+                    badge.className = "px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30";
+                } else if (activeId === item.id) {
+                    if (isDownloading) {
+                        badge.innerText = "⏳ In-Progress";
+                        badge.className = "px-2 py-0.5 rounded text-[10px] font-semibold bg-blue-500/20 text-blue-300 border border-blue-500/30 animate-pulse";
+                    } else if (isPaused) {
+                        badge.innerText = "⏸ Paused";
+                        badge.className = "px-2 py-0.5 rounded text-[10px] font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/30";
+                    }
+                } else {
+                    badge.innerText = "Queued";
+                    badge.className = "px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-800 text-slate-400";
+                }
+            });
+        }
+
+        function toggleAll(status) {
+            document.querySelectorAll('.item-chk').forEach(chk => {
+                if (chk.closest('.item-row').style.display !== 'none') {
+                    chk.checked = status;
+                }
+            });
+        }
+
+        function filterType(type, isChecked) {
+            document.querySelectorAll(`.item-row.${type}`).forEach(el => {
+                el.style.display = isChecked ? 'flex' : 'none';
+                const chk = el.querySelector('.item-chk');
+                if (chk) chk.checked = isChecked;
+            });
+        }
+
+        async function startDownload() {
+            const checked = Array.from(document.querySelectorAll('.item-chk:checked')).map(c => parseInt(c.value));
+            if (checked.length === 0) return alert('Select at least one lecture!');
+
+            const folder = document.getElementById('folderInput').value.trim() || 'Downloads';
+
+            try {
+                const res = await fetch('/api/start-download', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ selected_ids: checked, folder_name: folder })
+                });
+                const data = await res.json();
+                if (!res.ok) alert(data.message);
+                else pollStatus();
+            } catch(e) {
+                alert('Error: ' + e);
+            }
+        }
+    </script>
+</body>
+</html>
