@@ -1,12 +1,13 @@
 import os
+import re
 import time
 import asyncio
-from typing import Any, List, Dict, Optional
+from typing import Any, List, Dict, Optional, Tuple, AsyncGenerator
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
 from telethon.tl.types import DocumentAttributeVideo
 
-from config import get_session_dir, get_session_credentials, save_session_credentials, clear_session_storage
+from config import get_session_dir, get_session_credentials, save_session_credentials, clear_session_storage, BASE_SESSION_DIR
 from state import AppState, prevent_sleep, allow_sleep, DownloadCancelledException
 from utils import sanitize_filename, format_seconds, parse_telegram_url
 
@@ -26,13 +27,39 @@ class SessionContext:
         self.state = AppState(self.session_dir)
         self.client: Any = None
 
+    def resolve_active_dir(self) -> str:
+        """Allows mobile devices connected over LAN to seamlessly share the active PC login."""
+        local_session = os.path.join(self.session_dir, "telegram.session")
+        local_cred = os.path.join(self.session_dir, "credentials.json")
+        if os.path.exists(local_session) and os.path.exists(local_cred):
+            return self.session_dir
+
+        if os.path.exists(BASE_SESSION_DIR):
+            for folder in sorted(os.listdir(BASE_SESSION_DIR)):
+                cand = os.path.join(BASE_SESSION_DIR, folder)
+                if os.path.exists(os.path.join(cand, "telegram.session")) and os.path.exists(os.path.join(cand, "credentials.json")):
+                    return cand
+        return self.session_dir
+
     async def get_client(self) -> Any:
+        active_dir = self.resolve_active_dir()
         if self.client is None or not self.client.is_connected():
-            api_id, api_hash = get_session_credentials(self.session_id)
+            cred_file = os.path.join(active_dir, "credentials.json")
+            api_id, api_hash = 0, ""
+            if os.path.exists(cred_file):
+                import json
+                try:
+                    with open(cred_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        api_id = int(data.get("api_id", 0))
+                        api_hash = str(data.get("api_hash", "")).strip()
+                except Exception:
+                    pass
+
             if not api_id or not api_hash:
-                raise ValueError("Telegram credentials not configured for this session.")
+                raise ValueError("Telegram credentials not configured. Click 'Telegram Account' at the top to sign in.")
             
-            session_file = os.path.join(self.session_dir, "telegram.session")
+            session_file = os.path.join(active_dir, "telegram.session")
             self.client = TelegramClient(session_file, api_id, api_hash)
             await self.client.connect()
         return self.client
@@ -46,7 +73,17 @@ def get_session_ctx(session_id: str) -> SessionContext:
 
 async def get_telegram_auth_status(session_id: str) -> dict:
     ctx = get_session_ctx(session_id)
-    api_id, _ = get_session_credentials(session_id)
+    active_dir = ctx.resolve_active_dir()
+    cred_file = os.path.join(active_dir, "credentials.json")
+    api_id = 0
+
+    if os.path.exists(cred_file):
+        import json
+        try:
+            with open(cred_file, "r", encoding="utf-8") as f:
+                api_id = int(json.load(f).get("api_id", 0))
+        except Exception:
+            pass
 
     if not api_id:
         return {
@@ -132,8 +169,8 @@ async def complete_telegram_sign_in(session_id: str, code: str, password: str = 
     return {"status": "ok", "user": name}
 
 async def logout_telegram_session(session_id: str):
-    """Officially terminates MTProto session with Telegram and wipes local files."""
     ctx = get_session_ctx(session_id)
+    active_dir = ctx.resolve_active_dir()
     cl: Any = ctx.client
     if cl is not None:
         try:
@@ -149,10 +186,90 @@ async def logout_telegram_session(session_id: str):
         ctx.client = None
 
     ctx.state.reset()
+    clear_session_storage(os.path.basename(active_dir))
     clear_session_storage(session_id)
     if session_id in _sessions_pool:
         del _sessions_pool[session_id]
 
+# ==============================================================================
+# ZERO-DISK PASSTHROUGH STREAM GENERATOR (Direct to Downloads Folder)
+# ==============================================================================
+async def get_file_stream_generator(session_id: str, msg_id: int) -> Tuple[AsyncGenerator[bytes, None], str, int]:
+    """Streams file directly from Telegram to browser. ZERO cloud storage used."""
+    ctx = get_session_ctx(session_id)
+    cl: Any = await ctx.get_client()
+
+    if not await cl.is_user_authorized():
+        raise PermissionError("Telegram is not logged in. Click 'Telegram Account' at top to sign in first.")
+
+    # Auto-recover peer from active_peer, target_url, or saved state
+    peer = ctx.state.active_peer
+    if not peer:
+        if ctx.state.target_url:
+            peer, _ = parse_telegram_url(ctx.state.target_url)
+            ctx.state.active_peer = peer
+        else:
+            ctx.state.load_from_disk()
+            if ctx.state.target_url:
+                peer, _ = parse_telegram_url(ctx.state.target_url)
+                ctx.state.active_peer = peer
+
+    # Check shared session state if mobile connected to host
+    if not peer:
+        active_dir = ctx.resolve_active_dir()
+        state_file = os.path.join(active_dir, "downloads_state.json")
+        if os.path.exists(state_file):
+            import json
+            try:
+                with open(state_file, "r", encoding="utf-8") as f:
+                    t_url = json.load(f).get("target_url", "")
+                    if t_url:
+                        peer, _ = parse_telegram_url(t_url)
+                        ctx.state.active_peer = peer
+            except Exception:
+                pass
+
+    if not peer:
+        raise ValueError("No lecture topic found. Please paste your Telegram URL and click 'Scan Lectures' first.")
+
+    raw_entity = await cl.get_entity(peer)
+    entity = raw_entity[0] if isinstance(raw_entity, list) else raw_entity
+
+    raw_msg = await cl.get_messages(entity, ids=msg_id)
+    msg: Any = raw_msg[0] if isinstance(raw_msg, list) else raw_msg
+    if not msg or not msg.file:
+        raise ValueError("Lecture file not found or has no media attached.")
+
+    file_entity = msg.document if msg.document else msg
+    file_size = msg.file.size or 0
+
+    is_pdf = bool(msg.document and msg.document.mime_type == 'application/pdf')
+    ext = ".pdf" if is_pdf else ".mp4"
+
+    raw_name = msg.file.name
+    if not raw_name:
+        caption = msg.text or ""
+        title_candidate = caption.split('\n')[0].strip() if caption else f"Lecture_{msg_id}"
+        clean_title = sanitize_filename(title_candidate)[:50]
+        file_name = f"{clean_title}{ext}"
+    else:
+        file_name = sanitize_filename(raw_name)
+        if not file_name.lower().endswith(('.mp4', '.pdf', '.mkv', '.avi')):
+            file_name += ext
+
+    async def stream_chunks():
+        async for chunk in cl.iter_download(
+            file_entity,
+            chunk_size=CHUNK_SIZE,
+            request_size=CHUNK_SIZE
+        ):
+            yield chunk
+
+    return stream_chunks(), file_name, file_size
+
+# ==============================================================================
+# STANDARD PARALLEL BATCH ENGINE (For local disk storage)
+# ==============================================================================
 def update_aggregate_progress(state: AppState, total_size: int, stream_progress: List[int], stream_totals: List[int]):
     now = time.time()
     dt = now - state.last_time

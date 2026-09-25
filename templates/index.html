@@ -6,7 +6,7 @@
     <title>Lecture Downloader & Offline Study Hub</title>
     <script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body class="bg-slate-950 text-slate-100 min-h-screen p-6 font-sans">
+<body class="bg-slate-950 text-slate-100 min-h-screen p-4 sm:p-6 font-sans">
     <div class="max-w-4xl mx-auto space-y-6">
         
         <!-- Header -->
@@ -15,7 +15,7 @@
                 <h1 class="text-2xl font-bold tracking-tight text-white flex items-center gap-2">
                     <span class="p-2 bg-blue-600 rounded-lg text-lg">⚡</span> Batch Lecture Studio
                 </h1>
-                <p class="text-slate-400 text-xs mt-1">Multi-stream parallel lecture downloader with pause/resume and offline player.</p>
+                <p class="text-slate-400 text-xs mt-1">Multi-stream parallel lecture downloader with direct-to-device saving.</p>
             </div>
             <div class="flex items-center gap-2 sm:gap-3 flex-wrap justify-end">
                 <button onclick="openSettingsModal()" id="tgStatusBtn" 
@@ -34,11 +34,11 @@
         <!-- URL Input Card -->
         <div class="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl space-y-4">
             <label class="text-xs font-bold text-slate-300 uppercase tracking-wider">Telegram Topic or Channel URL</label>
-            <div class="flex gap-2">
+            <div class="flex flex-col sm:flex-row gap-2">
                 <input id="urlInput" type="text" placeholder="https://t.me/c/2293028281/37178 or https://t.me/Gate_cse_2026/620" 
                     class="flex-1 px-4 py-3 rounded-xl bg-slate-950 border border-slate-700 text-slate-200 focus:outline-none focus:border-blue-500 font-mono text-sm" />
                 <button id="scanBtn" onclick="scanTopic()" 
-                    class="bg-blue-600 hover:bg-blue-500 font-semibold px-6 py-3 rounded-xl transition flex items-center gap-2 text-sm shadow-lg shadow-blue-600/30 cursor-pointer">
+                    class="bg-blue-600 hover:bg-blue-500 font-semibold px-6 py-3 rounded-xl transition flex items-center justify-center gap-2 text-sm shadow-lg shadow-blue-600/30 cursor-pointer">
                     Scan Lectures
                 </button>
             </div>
@@ -65,7 +65,7 @@
                 </div>
             </div>
 
-            <!-- Multi-Stream Visual Indicator (VidMate / IDM Engine) -->
+            <!-- Multi-Stream Visual Indicator -->
             <div id="streamsContainer" class="space-y-2 pt-3 border-t border-slate-800/80 hidden">
                 <div class="flex items-center justify-between text-[11px] font-semibold text-slate-400">
                     <span class="flex items-center gap-2 text-indigo-400">
@@ -90,24 +90,25 @@
 
         <!-- Discovered Lectures & Materials Checklist -->
         <div id="queueSection" class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4 hidden">
+            
             <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-4">
                 <div>
                     <h2 class="text-base font-bold text-white">Discovered Lectures & Materials</h2>
                     <p class="text-xs text-slate-400" id="queueSummary">Select lectures to download.</p>
                 </div>
-                <!-- Folder Input + Browse Button + Download Action -->
+                <!-- Server Batch Download Controls -->
                 <div class="flex items-center gap-2 flex-wrap sm:flex-nowrap">
-                    <div class="flex items-center gap-1.5 flex-1 min-w-[240px]">
-                        <input id="folderInput" type="text" placeholder="Download Path (e.g. D:\Lectures)" 
+                    <div class="flex items-center gap-1.5 flex-1 min-w-[200px]">
+                        <input id="folderInput" type="text" placeholder="Server Path (e.g. Downloads)" 
                             class="flex-1 px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-200 font-mono focus:outline-none focus:border-blue-500 truncate" />
-                        <button id="browseBtn" type="button" onclick="browseFolder()" title="Browse folder on your PC"
+                        <button id="browseBtn" type="button" onclick="browseFolder()" title="Browse folder on host PC"
                             class="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3 py-2 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer whitespace-nowrap shadow-sm">
                             <span>📁</span> <span>Browse</span>
                         </button>
                     </div>
                     <button id="startDownloadBtn" onclick="startDownload()" 
                         class="bg-blue-600 hover:bg-blue-500 text-white font-semibold px-4 py-2 rounded-lg text-xs transition shadow-lg shadow-blue-600/30 cursor-pointer whitespace-nowrap">
-                        Download Selected
+                        Batch Download
                     </button>
                 </div>
             </div>
@@ -125,7 +126,7 @@
                 </div>
             </div>
 
-            <div class="max-h-[380px] overflow-y-auto space-y-1.5 pr-1" id="itemsList"></div>
+            <div class="max-h-[420px] overflow-y-auto space-y-2 pr-1" id="itemsList"></div>
         </div>
 
     </div>
@@ -288,6 +289,31 @@
             } catch (e) {
                 return { configured: false, authorized: false };
             }
+        }
+
+        // Native Browser Download Trigger: Downloads straight into device's Downloads folder
+        function startDeviceDownload(msgId, filename) {
+            fetch('/api/telegram-auth/status')
+                .then(res => res.json())
+                .then(data => {
+                    if (!data.authorized) {
+                        alert("⚠️ Telegram account is not logged in!\nClick 'Telegram Account' at the top to sign in first.");
+                        openSettingsModal();
+                        return;
+                    }
+                    
+                    // Directly trigger browser file download without downloading a .json error file
+                    const downloadUrl = `/api/download-file/${msgId}`;
+                    const a = document.createElement('a');
+                    a.href = downloadUrl;
+                    a.setAttribute('download', filename || `Lecture_${msgId}.mp4`);
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                })
+                .catch(err => {
+                    alert("Network connection error: " + err);
+                });
         }
 
         function toggleHashVisibility() {
@@ -651,19 +677,26 @@
             scannedItems.forEach((item, index) => {
                 totalMB += item.size_mb;
                 const row = document.createElement('div');
-                row.className = `flex items-center justify-between p-3 rounded-xl bg-slate-950/60 border border-slate-800/80 text-xs item-row ${item.type}`;
+                row.className = `flex flex-col sm:flex-row sm:items-center justify-between p-3 rounded-xl bg-slate-950/60 border border-slate-800/80 text-xs item-row ${item.type} gap-2.5`;
                 row.id = `item-row-${item.id}`;
                 row.innerHTML = `
-                    <div class="flex items-center gap-3 truncate max-w-[550px]">
+                    <div class="flex items-center gap-3 truncate max-w-full sm:max-w-[460px]">
                         <input type="checkbox" value="${item.id}" checked class="item-chk rounded bg-slate-900 border-slate-700" />
                         <span class="font-mono text-slate-500 font-semibold">#${(index + 1).toString().padStart(2, '0')}</span>
                         <span class="px-1.5 py-0.5 rounded text-[10px] font-bold ${item.type === 'video' ? 'bg-blue-600/20 text-blue-400' : 'bg-red-600/20 text-red-400'}">${item.type.toUpperCase()}</span>
                         <span id="badge-${item.id}" class="px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-800 text-slate-400">Queued</span>
                         <span class="text-slate-200 truncate font-medium">${item.title}</span>
                     </div>
-                    <div class="flex items-center gap-4 text-slate-400 font-mono text-[11px]">
+                    
+                    <div class="flex items-center justify-between sm:justify-end gap-3 text-slate-400 font-mono text-[11px] pl-7 sm:pl-0">
                         <span>${item.duration || ''}</span>
                         <span>${item.size_mb} MB</span>
+                        
+                        <!-- Direct to Downloads Folder button for Mobile / PC -->
+                        <button type="button" onclick="startDeviceDownload(${item.id}, '${item.clean_filename.replace(/'/g, "\\'")}')"
+                           class="bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 px-3 py-1.5 rounded-lg text-xs font-sans font-semibold transition flex items-center gap-1 cursor-pointer whitespace-nowrap shadow-sm">
+                           <span>📥</span> <span>Download</span>
+                        </button>
                     </div>
                 `;
                 container.appendChild(row);
@@ -679,7 +712,7 @@
                 if (!badge) return;
 
                 if (completedIds.includes(item.id)) {
-                    badge.innerText = "✓ Done";
+                    badge.innerText = "✓ Server Saved";
                     badge.className = "px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30";
                 } else if (activeId === item.id) {
                     if (isDownloading) {

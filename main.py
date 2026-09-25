@@ -6,10 +6,11 @@ import secrets
 import logging
 import asyncio
 import urllib.request
+import urllib.parse
 from typing import List, Optional
 from pydantic import BaseModel
 from fastapi import FastAPI, BackgroundTasks, Request, Response, Depends
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, HTMLResponse
 
 from downloader import (
     get_session_ctx,
@@ -19,7 +20,8 @@ from downloader import (
     complete_telegram_sign_in,
     logout_telegram_session,
     scan_channel_or_topic,
-    run_batch_download
+    run_batch_download,
+    get_file_stream_generator
 )
 
 class NoiseFilter(logging.Filter):
@@ -43,7 +45,7 @@ def resolve_session_id(request: Request, response: Response) -> str:
             value=token,
             httponly=True,
             samesite="lax",
-            max_age=60 * 60 * 24 * 30  # 30 days
+            max_age=60 * 60 * 24 * 30
         )
     return token
 
@@ -65,6 +67,9 @@ class SignInRequest(BaseModel):
     code: str
     password: Optional[str] = ""
 
+# ==============================================================================
+# FRONTEND HTML ROUTES
+# ==============================================================================
 @app.get("/")
 async def serve_index():
     template_path = os.path.join(os.path.dirname(__file__), "templates", "index.html")
@@ -74,6 +79,57 @@ async def serve_index():
 async def serve_speedtest():
     template_path = os.path.join(os.path.dirname(__file__), "templates", "speedtest.html")
     return FileResponse(template_path)
+
+# ==============================================================================
+# DIRECT DEVICE DOWNLOAD (Saves directly to user's Downloads folder)
+# ==============================================================================
+@app.get("/api/download-file/{msg_id}")
+async def handle_download_file(msg_id: int, sid: str = Depends(resolve_session_id)):
+    """Pipes Telegram video directly to the device's default Downloads folder."""
+    try:
+        chunk_iter, filename, file_size = await get_file_stream_generator(sid, msg_id)
+        
+        ascii_safe = re.sub(r'[^a-zA-Z0-9_.-]', '_', filename)
+        encoded_filename = urllib.parse.quote(filename)
+
+        headers = {
+            "Content-Disposition": f'attachment; filename="{ascii_safe}"; filename*=UTF-8\'\'{encoded_filename}',
+            "Content-Type": "application/octet-stream",
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "no-cache",
+        }
+        if file_size > 0:
+            headers["Content-Length"] = str(file_size)
+
+        return StreamingResponse(
+            chunk_iter,
+            media_type="application/octet-stream",
+            headers=headers
+        )
+    except Exception as e:
+        err_msg = str(e)
+        return HTMLResponse(
+            content=f"""<!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1">
+                <title>Download Alert</title>
+                <script src="https://cdn.tailwindcss.com"></script>
+            </head>
+            <body class="bg-slate-950 text-slate-100 min-h-screen flex items-center justify-center p-4">
+                <div class="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-6 text-center space-y-4 shadow-2xl">
+                    <span class="text-4xl">⚠️</span>
+                    <h2 class="text-lg font-bold text-red-400">Download Notice</h2>
+                    <p class="text-xs text-slate-300 leading-relaxed">{err_msg}</p>
+                    <a href="/" class="inline-block bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs px-5 py-2.5 rounded-xl transition shadow-lg shadow-blue-600/30">
+                        &larr; Back to Downloader
+                    </a>
+                </div>
+            </body>
+            </html>""",
+            status_code=400
+        )
 
 # ==============================================================================
 # TELEGRAM AUTHENTICATION & CREDENTIALS APIS
@@ -137,8 +193,7 @@ def choose_folder_dialog(default_dir: str = "") -> str:
         selected = filedialog.askdirectory(initialdir=initial, title="Select Destination Folder")
         root.destroy()
         return selected or ""
-    except Exception as e:
-        print(f"[FolderPicker Error] {e}")
+    except Exception:
         return ""
 
 @app.post("/api/browse-folder")
@@ -201,6 +256,21 @@ async def handle_speedtest_run():
 async def get_initial_state(sid: str = Depends(resolve_session_id)):
     ctx = get_session_ctx(sid)
     st = ctx.state
+    # Sync with shared session state if empty
+    if not st.scanned_items:
+        active_dir = ctx.resolve_active_dir()
+        s_file = os.path.join(active_dir, "downloads_state.json")
+        if os.path.exists(s_file):
+            import json
+            try:
+                with open(s_file, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+                    st.scanned_items = d.get("scanned_items", [])
+                    st.target_url = d.get("target_url", "")
+                    st.default_folder = d.get("default_folder", "")
+            except Exception:
+                pass
+
     return {
         "target_url": st.target_url,
         "default_folder": st.default_folder,
@@ -295,11 +365,10 @@ async def handle_status(sid: str = Depends(resolve_session_id)):
     }
 
 # ==============================================================================
-# SERVER ENTRY POINT (DYNAMIC CLOUD PORT & LOCAL COMPATIBILITY)
+# SERVER ENTRY POINT
 # ==============================================================================
 if __name__ == "__main__":
     import uvicorn
-    # Render assigns a dynamic port via the PORT environment variable; falls back to 8000 locally
     port = int(os.environ.get("PORT", 8000))
     print("\n" + "=" * 65)
     print(f" [FastAPI Server Started on Port {port}]")
