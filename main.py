@@ -42,6 +42,33 @@ async def startup_event():
         print("[Telegram] Warning: Not authorized. Run initial login script.")
 
 # ==============================================================================
+# NATIVE FOLDER PICKER DIALOG
+# ==============================================================================
+def choose_folder_dialog(default_dir: str = "") -> str:
+    """Opens a native Windows folder picker dialog and returns the selected path."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        
+        root = tk.Tk()
+        root.withdraw()          # Hide the background tkinter window
+        root.lift()              # Bring to top
+        root.focus_force()
+        root.attributes('-topmost', True)  # Ensure it floats above the browser
+        
+        initial = default_dir if (default_dir and os.path.exists(default_dir) and os.path.isdir(default_dir)) else os.getcwd()
+        
+        selected = filedialog.askdirectory(
+            initialdir=initial,
+            title="Select Download Destination Folder"
+        )
+        root.destroy()
+        return selected or ""
+    except Exception as e:
+        print(f"[FolderPicker Error] {e}")
+        return ""
+
+# ==============================================================================
 # FRONTEND HTML ROUTES
 # ==============================================================================
 @app.get("/")
@@ -55,11 +82,22 @@ async def serve_speedtest():
     return FileResponse(template_path)
 
 # ==============================================================================
-# SPEED TEST BENCHMARK ENGINE
+# FOLDER BROWSER & SPEED TEST APIS
 # ==============================================================================
+@app.post("/api/browse-folder")
+async def handle_browse_folder():
+    """Allows user to browse and pick any directory on their PC."""
+    current = state.download_folder or state.default_folder or os.getcwd()
+    selected_dir = await asyncio.to_thread(choose_folder_dialog, current)
+    if selected_dir:
+        normalized = os.path.normpath(selected_dir)
+        state.download_folder = normalized
+        state.save_to_disk()
+        return {"status": "ok", "path": normalized}
+    return {"status": "cancelled", "path": ""}
+
 def perform_bandwidth_test() -> dict:
     """Measures real downstream bandwidth and latency to Telegram DC."""
-    # 1. Telegram DC4 IP Latency check (149.154.167.50:443)
     ping_ms = 0.0
     try:
         t0 = time.time()
@@ -67,10 +105,9 @@ def perform_bandwidth_test() -> dict:
         s.close()
         ping_ms = round((time.time() - t0) * 1000, 1)
     except Exception:
-        ping_ms = 145.0  # Fallback approximation for Indian ISP routing
+        ping_ms = 145.0
 
-    # 2. Fast 20MB CDN multi-chunk download test
-    test_url = "https://speed.cloudflare.com/__down?bytes=20971520"  # 20 MB test payload
+    test_url = "https://speed.cloudflare.com/__down?bytes=20971520"
     downloaded_bytes = 0
     t_start = time.time()
 
@@ -82,7 +119,6 @@ def perform_bandwidth_test() -> dict:
         with urllib.request.urlopen(req, timeout=12) as response:
             while chunk := response.read(256 * 1024):
                 downloaded_bytes += len(chunk)
-                # Keep test under 6 seconds max
                 if time.time() - t_start >= 6.0:
                     break
     except Exception:
@@ -205,5 +241,4 @@ if __name__ == "__main__":
     print(" LAN / Wi-Fi Access:   http://192.168.1.2:8000")
     print(" Speed Test Page:      http://192.168.1.2:8000/speedtest")
     print("=" * 65 + "\n")
-    # Binding to 0.0.0.0 exposes port 8000 to http://192.168.1.2:8000
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)

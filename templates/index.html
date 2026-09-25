@@ -68,15 +68,12 @@
                     </span>
                     <span class="text-[10px] text-slate-500 font-mono">4 Sockets Active</span>
                 </div>
-                <div id="streamsList" class="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
-                    <!-- Stream progress cards injected here dynamically -->
-                </div>
+                <div id="streamsList" class="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1"></div>
             </div>
 
             <div class="flex justify-between items-center border-t border-slate-800/80 pt-4">
                 <p id="logText" class="text-xs text-blue-400 font-mono truncate max-w-[460px]">Idle</p>
                 <div class="flex items-center gap-2">
-                    <!-- Dynamic Action Button: Changes Stop <-> Resume -->
                     <button id="actionBtn" onclick="handleActionClick()" disabled
                         class="bg-slate-800 text-slate-500 px-4 py-1.5 rounded-lg text-xs font-semibold transition cursor-not-allowed">
                         Stop Download
@@ -92,11 +89,18 @@
                     <h2 class="text-base font-bold text-white">Discovered Lectures & Materials</h2>
                     <p class="text-xs text-slate-400" id="queueSummary">Select lectures to download.</p>
                 </div>
-                <div class="flex items-center gap-2">
-                    <input id="folderInput" type="text" placeholder="Folder Name" 
-                        class="px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-200 font-mono focus:outline-none focus:border-blue-500" />
+                <!-- Folder Input + Browse Button + Download Action -->
+                <div class="flex items-center gap-2 flex-wrap sm:flex-nowrap">
+                    <div class="flex items-center gap-1.5 flex-1 min-w-[240px]">
+                        <input id="folderInput" type="text" placeholder="Download Path (e.g. D:\Lectures)" 
+                            class="flex-1 px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-200 font-mono focus:outline-none focus:border-blue-500 truncate" />
+                        <button id="browseBtn" type="button" onclick="browseFolder()" title="Browse folder on your PC"
+                            class="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3 py-2 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer whitespace-nowrap shadow-sm">
+                            <span>📁</span> <span>Browse</span>
+                        </button>
+                    </div>
                     <button id="startDownloadBtn" onclick="startDownload()" 
-                        class="bg-blue-600 hover:bg-blue-500 text-white font-semibold px-4 py-2 rounded-lg text-xs transition shadow-lg shadow-blue-600/30 cursor-pointer">
+                        class="bg-blue-600 hover:bg-blue-500 text-white font-semibold px-4 py-2 rounded-lg text-xs transition shadow-lg shadow-blue-600/30 cursor-pointer whitespace-nowrap">
                         Download Selected
                     </button>
                 </div>
@@ -135,7 +139,14 @@
                 const data = await res.json();
 
                 if (data.target_url) document.getElementById('urlInput').value = data.target_url;
-                if (data.default_folder) document.getElementById('folderInput').value = data.default_folder;
+                
+                // Prioritize user's saved custom download path over default name
+                if (data.download_folder) {
+                    document.getElementById('folderInput').value = data.download_folder;
+                } else if (data.default_folder) {
+                    document.getElementById('folderInput').value = data.default_folder;
+                }
+
                 if (data.log) document.getElementById('logText').innerText = data.log;
 
                 completedIds = data.completed_ids || [];
@@ -159,7 +170,29 @@
             scheduleNextPoll(1000);
         });
 
-        // Pause polling when browser tab is inactive to save system resources
+        // Native Windows folder picker invoker
+        async function browseFolder() {
+            const btn = document.getElementById('browseBtn');
+            const origHtml = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<span>⏳</span> <span>Opening...</span>';
+
+            try {
+                const res = await fetch('/api/browse-folder', { method: 'POST' });
+                const data = await res.json();
+                if (data.status === 'ok' && data.path) {
+                    document.getElementById('folderInput').value = data.path;
+                } else if (data.status === 'error') {
+                    alert(data.message || 'Could not open folder picker.');
+                }
+            } catch (e) {
+                alert('Folder picker request failed: ' + e);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = origHtml;
+            }
+        }
+
         document.addEventListener('visibilitychange', () => {
             if (document.hidden) {
                 isPollingActive = false;
@@ -340,7 +373,13 @@
                     alert(data.message || 'Scan failed.');
                 } else {
                     scannedItems = data.items;
-                    document.getElementById('folderInput').value = data.default_folder;
+                    
+                    // Don't overwrite if user has already set a custom directory
+                    const currFolder = document.getElementById('folderInput').value.trim();
+                    if (!currFolder || currFolder.startsWith("Lectures_")) {
+                        document.getElementById('folderInput').value = data.default_folder;
+                    }
+
                     renderQueue();
                     document.getElementById('queueSection').classList.remove('hidden');
                 }
