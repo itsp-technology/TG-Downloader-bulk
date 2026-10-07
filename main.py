@@ -1,16 +1,18 @@
 import os
 import re
+import sys
 import time
 import socket
 import secrets
 import logging
 import asyncio
+import subprocess
 import urllib.request
 import urllib.parse
 from typing import List, Optional
-from pydantic import BaseModel
-from fastapi import FastAPI, BackgroundTasks, Request, Response, Depends
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, HTMLResponse
+from pydantic import BaseModel # type: ignore
+from fastapi import FastAPI, BackgroundTasks, Request, Response, Depends # type: ignore
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, HTMLResponse # type: ignore
 
 from downloader import (
     get_session_ctx,
@@ -137,8 +139,6 @@ async def handle_download_file(msg_id: int, request: Request, sid: str = Depends
         encoded_filename = urllib.parse.quote(filename)
         content_len = (eff_end - eff_start) + 1 if total_size > 0 else 0
         etag_val = f'"tg-{msg_id}-{total_size}"'
-
-        # Set MIME type to prevent Android Chrome "can't be downloaded securely" flags
         mime_type = "application/pdf" if filename.lower().endswith(".pdf") else "video/mp4"
 
         headers = {
@@ -240,25 +240,63 @@ async def handle_logout(response: Response, sid: str = Depends(resolve_session_i
         return JSONResponse({"status": "error", "message": str(e)}, status_code=400)
 
 # ==============================================================================
-# FOLDER PICKER & SPEED TEST APIS
+# NATIVE WINDOWS / LAPTOP FOLDER PICKER (RELIABLE POWERSHELL STA DIALOG)
 # ==============================================================================
 def choose_folder_dialog(default_dir: str = "") -> str:
+    """Opens a native Folder Browser Dialog right in front of the browser window."""
+    if sys.platform == "win32":
+        try:
+            init_dir = os.path.abspath(default_dir) if (default_dir and os.path.isdir(default_dir)) else os.getcwd()
+            init_dir_esc = init_dir.replace("'", "''")
+            
+            # PowerShell in STA mode with TopMost ensures dialog opens directly over Chrome/Edge
+            ps_cmd = (
+                "Add-Type -AssemblyName System.Windows.Forms; "
+                "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog; "
+                f"$dialog.SelectedPath = '{init_dir_esc}'; "
+                "$dialog.Description = 'Select Destination Folder for Lectures'; "
+                "$dialog.ShowNewFolderButton = $true; "
+                "$form = New-Object System.Windows.Forms.Form; "
+                "$form.TopMost = $true; "
+                "if ($dialog.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) { "
+                "  [Console]::WriteLine($dialog.SelectedPath) "
+                "}"
+            )
+            
+            startupinfo = None
+            if hasattr(subprocess, "STARTUPINFO"):
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            
+            res = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-STA", "-Command", ps_cmd],
+                capture_output=True,
+                text=True,
+                startupinfo=startupinfo,
+                timeout=180
+            )
+            selected_path = res.stdout.strip()
+            if selected_path and os.path.isdir(selected_path):
+                return os.path.normpath(selected_path)
+        except Exception as e:
+            print(f"[Browse Folder] PowerShell error: {e}")
+
+    # Fallback to Tkinter (for non-Windows environments)
     try:
         import tkinter as tk
         from tkinter import filedialog
-        
         root = tk.Tk()
         root.withdraw()
-        root.lift()
-        root.focus_force()
         root.attributes('-topmost', True)
-        
-        initial = default_dir if (default_dir and os.path.exists(default_dir) and os.path.isdir(default_dir)) else os.getcwd()
+        initial = default_dir if (default_dir and os.path.isdir(default_dir)) else os.getcwd()
         selected = filedialog.askdirectory(initialdir=initial, title="Select Destination Folder")
         root.destroy()
-        return selected or ""
-    except Exception:
-        return ""
+        if selected and os.path.isdir(selected):
+            return os.path.normpath(selected)
+    except Exception as e:
+        print(f"[Browse Folder] Tkinter fallback error: {e}")
+
+    return ""
 
 @app.post("/api/browse-folder")
 async def handle_browse_folder(sid: str = Depends(resolve_session_id)):

@@ -13,7 +13,7 @@
         <div class="flex items-center justify-between border-b border-slate-800 pb-5">
             <div>
                 <h1 class="text-2xl font-bold tracking-tight text-white flex items-center gap-2">
-                    <span class="p-2 bg-blue-600 rounded-lg text-lg">⚡</span> Batch Lecture Studio
+                    <span class="p-2 bg-blue-600 rounded-lg text-lg">⚡</span> Batch Lecture Studio fix 
                 </h1>
                 <p class="text-slate-400 text-xs mt-1">Multi-stream parallel lecture downloader with direct-to-device saving.</p>
             </div>
@@ -88,7 +88,7 @@
             </div>
         </div>
 
-        <!-- Discovered Lectures Checklist -->
+        <!-- Discovered Lectures & Materials Checklist -->
         <div id="queueSection" class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4 hidden">
             
             <div id="mobileStorageNotice" class="p-3 bg-emerald-950/40 border border-emerald-800/50 rounded-xl text-xs text-emerald-300 flex items-center gap-2.5 hidden">
@@ -104,19 +104,22 @@
                     <p class="text-xs text-slate-400" id="queueSummary">Select lectures to download.</p>
                 </div>
 
+                <!-- Action Bar -->
                 <div class="flex items-center gap-2 flex-wrap sm:flex-nowrap">
+                    <!-- Desktop-only Folder Selection -->
                     <div id="desktopFolderControls" class="flex items-center gap-1.5 flex-1 min-w-[200px]">
-                        <input id="folderInput" type="text" placeholder="Server Path (e.g. D:\Lectures)" 
+                        <input id="folderInput" type="text" placeholder="Destination Folder (e.g. D:\Lectures)" 
                             class="flex-1 px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-200 font-mono focus:outline-none focus:border-blue-500 truncate" />
-                        <button id="browseBtn" type="button" onclick="browseFolder()" title="Browse folder on host PC"
+                        <button id="browseBtn" type="button" onclick="browseFolder()" title="Browse folder on your Laptop"
                             class="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3 py-2 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer whitespace-nowrap shadow-sm">
                             <span>📁</span> <span>Browse</span>
                         </button>
                     </div>
 
+                    <!-- Main Batch Download Button -->
                     <button id="startDownloadBtn" onclick="handleBatchDownloadClick()" 
                         class="bg-blue-600 hover:bg-blue-500 text-white font-semibold px-4 py-2 rounded-lg text-xs transition shadow-lg shadow-blue-600/30 cursor-pointer flex items-center gap-1.5 whitespace-nowrap">
-                        <span id="startBtnIcon">📲</span>
+                        <span id="startBtnIcon">📁</span>
                         <span id="startBtnText">Batch Download</span>
                     </button>
                 </div>
@@ -227,9 +230,9 @@
         let isPollingActive = true;
         let currentAppMode = "server";
 
+        // Accurate Mobile Detection (Only real mobile operating systems)
         function isMobileClient() {
-            return /Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
-                || (window.matchMedia && window.matchMedia("(max-width: 768px)").matches);
+            return /Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
         }
 
         function adaptUIForDevice() {
@@ -326,7 +329,7 @@
             }
         }
 
-        // Clean user-gesture anchor navigation (eliminates Android Chrome insecure download warning)
+        // Mobile Native Anchor Trigger (Eliminates Chrome insecure warning)
         function triggerNativeBrowserDownload(msgId, filename) {
             const a = document.createElement('a');
             a.style.display = 'none';
@@ -342,27 +345,46 @@
             }, 2500);
         }
 
-        function startDeviceDownloadById(msgId) {
-            const item = scannedItems.find(x => x.id === msgId);
-            const filename = item ? item.clean_filename : `Lecture_${msgId}.mp4`;
+        // Handles Individual Lecture Click:
+        // On Mobile: streams straight into phone's Downloads folder.
+        // On Laptop: saves directly into selected local hard drive folder (NO BROWSER POPUPS).
+        async function handleSingleDownload(msgId) {
+            const authStatus = await checkTelegramAuth();
+            if (!authStatus.authorized) {
+                alert("⚠️ Telegram account is not logged in!\nClick 'Telegram Account' at the top to sign in first.");
+                openSettingsModal();
+                return;
+            }
 
-            fetch('/api/telegram-auth/status')
-                .then(res => res.json())
-                .then(data => {
-                    if (!data.authorized) {
-                        alert("⚠️ Telegram account is not logged in!\nClick 'Telegram Account' at the top to sign in first.");
-                        openSettingsModal();
-                        return;
+            if (isMobileClient()) {
+                const item = scannedItems.find(x => x.id === msgId);
+                const filename = item ? item.clean_filename : `Lecture_${msgId}.mp4`;
+                currentAppMode = "device";
+                triggerNativeBrowserDownload(msgId, filename);
+                pollStatus();
+            } else {
+                // Laptop mode: Direct to chosen disk folder
+                const folderInput = document.getElementById('folderInput');
+                const folder = (folderInput && folderInput.value.trim()) ? folderInput.value.trim() : 'Downloads';
+                try {
+                    const res = await fetch('/api/start-download', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ selected_ids: [msgId], folder_name: folder })
+                    });
+                    const data = await res.json();
+                    if (!res.ok) alert(data.message);
+                    else {
+                        currentAppMode = "server";
+                        pollStatus();
                     }
-                    currentAppMode = "device";
-                    triggerNativeBrowserDownload(msgId, filename);
-                    pollStatus();
-                })
-                .catch(err => {
-                    alert("Network error: " + err);
-                });
+                } catch(e) {
+                    alert('Error: ' + e);
+                }
+            }
         }
 
+        // Main Batch Downloader Router
         async function handleBatchDownloadClick() {
             const checked = Array.from(document.querySelectorAll('.item-chk:checked')).map(c => parseInt(c.value));
             if (checked.length === 0) return alert('Select at least one lecture!');
@@ -374,11 +396,8 @@
                 return;
             }
 
-            const folderInputVal = document.getElementById('folderInput') ? document.getElementById('folderInput').value.trim() : '';
-            const isMobile = isMobileClient();
-            const hasCustomLocalPath = folderInputVal && (folderInputVal.includes(':\\') || folderInputVal.startsWith('/'));
-
-            if (isMobile || !hasCustomLocalPath) {
+            if (isMobileClient()) {
+                // Mobile: stream sequentially into phone Downloads
                 try {
                     const res = await fetch('/api/device-batch/start', {
                         method: 'POST',
@@ -387,10 +406,7 @@
                     });
                     const d = await res.json();
                     if (!res.ok) return alert(d.message || 'Error starting mobile batch.');
-
-                    if (d.status === "already_done") {
-                        return alert(d.message);
-                    }
+                    if (d.status === "already_done") return alert(d.message);
 
                     currentAppMode = "device";
                     setActionButtonMode("downloading");
@@ -400,11 +416,15 @@
                     alert('Request error: ' + e);
                 }
             } else {
+                // Laptop / PC: Save directly to the chosen local folder (NO BROWSER POPUPS)
+                const folderInput = document.getElementById('folderInput');
+                const folder = (folderInput && folderInput.value.trim()) ? folderInput.value.trim() : 'Downloads';
+
                 try {
                     const res = await fetch('/api/start-download', {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({ selected_ids: checked, folder_name: folderInputVal })
+                        body: JSON.stringify({ selected_ids: checked, folder_name: folder })
                     });
                     const data = await res.json();
                     if (!res.ok) alert(data.message);
@@ -415,6 +435,27 @@
                 } catch(e) {
                     alert('Error: ' + e);
                 }
+            }
+        }
+
+        // Reliable Browse Folder Action on Laptop
+        async function browseFolder() {
+            const btn = document.getElementById('browseBtn');
+            const origHtml = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<span>⏳</span> <span>Opening...</span>';
+
+            try {
+                const res = await fetch('/api/browse-folder', { method: 'POST' });
+                const data = await res.json();
+                if (data.status === 'ok' && data.path) {
+                    document.getElementById('folderInput').value = data.path;
+                }
+            } catch (e) {
+                alert('Folder picker request failed: ' + e);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = origHtml;
             }
         }
 
@@ -548,26 +589,6 @@
                 checkTelegramAuth();
             } catch (e) {
                 alert('Logout failed: ' + e);
-            }
-        }
-
-        async function browseFolder() {
-            const btn = document.getElementById('browseBtn');
-            const origHtml = btn.innerHTML;
-            btn.disabled = true;
-            btn.innerHTML = '<span>⏳</span> <span>Opening...</span>';
-
-            try {
-                const res = await fetch('/api/browse-folder', { method: 'POST' });
-                const data = await res.json();
-                if (data.status === 'ok' && data.path) {
-                    document.getElementById('folderInput').value = data.path;
-                }
-            } catch (e) {
-                alert('Folder picker request failed: ' + e);
-            } finally {
-                btn.disabled = false;
-                btn.innerHTML = origHtml;
             }
         }
 
@@ -795,6 +816,7 @@
             const container = document.getElementById('itemsList');
             container.innerHTML = '';
             let totalMB = 0;
+            const isMobile = isMobileClient();
 
             scannedItems.forEach((item, index) => {
                 totalMB += item.size_mb;
@@ -814,9 +836,9 @@
                         <span>${item.duration || ''}</span>
                         <span>${item.size_mb} MB</span>
                         
-                        <button type="button" onclick="startDeviceDownloadById(${item.id})"
+                        <button type="button" onclick="handleSingleDownload(${item.id})"
                            class="bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 px-3 py-1.5 rounded-lg text-xs font-sans font-semibold transition flex items-center gap-1 cursor-pointer whitespace-nowrap shadow-sm">
-                           <span>📥</span> <span>Download</span>
+                           <span>📥</span> <span>${isMobile ? 'Download' : 'Download to Folder'}</span>
                         </button>
                     </div>
                 `;
