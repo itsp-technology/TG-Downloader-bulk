@@ -212,7 +212,7 @@ async def logout_telegram_session(session_id: str):
         del _sessions_pool[session_id]
 
 # ==============================================================================
-# RESILIENT MULTI-STREAM PIPELINE (Zero Stalling, Chunk Retries, Byte Resume)
+# HIGH-SPEED STREAM PIPELINE (Zero Memory Leaks, Safe Retries & Byte Resume)
 # ==============================================================================
 async def get_file_stream_generator(
     session_id: str,
@@ -289,7 +289,7 @@ async def get_file_stream_generator(
         if not file_name.lower().endswith(('.mp4', '.pdf', '.mkv', '.avi')):
             file_name += ext
 
-    # Initialize live monitors
+    # Initialize live state monitors
     st.active_id = msg_id
     st.current_file = file_name
     st.total_mb = resolved_total_size // (1024 * 1024)
@@ -308,124 +308,90 @@ async def get_file_stream_generator(
         if stream_content_length <= 0:
             return
 
-        start_chunk_idx: int = resolved_start // CHUNK_SIZE
-        end_chunk_idx: int = resolved_end // CHUNK_SIZE
-        total_chunks: int = end_chunk_idx - start_chunk_idx + 1
+        current_offset: int = resolved_start
+        last_time: float = time.time()
+        last_bytes: int = resolved_start
+        retries: int = 0
+        max_retries: int = 10
+        quarter: int = max(1, resolved_total_size // 4)
 
-        num_workers: int = min(MAX_PARALLEL_STREAMS, max(1, total_chunks))
-
-        # Chunk queue and buffer with safe concurrency
-        queue: asyncio.Queue = asyncio.Queue()
-        for idx in range(start_chunk_idx, end_chunk_idx + 1):
-            queue.put_nowait(idx)
-
-        chunks_buffer: Dict[int, bytes] = {}
-        chunk_event = asyncio.Event()
-        worker_bytes: List[int] = [0] * num_workers
-        worker_expected: List[int] = [
-            (total_chunks // num_workers + (1 if w < (total_chunks % num_workers) else 0)) * CHUNK_SIZE
-            for w in range(num_workers)
-        ]
-
-        async def fetch_single_chunk(offset: int) -> bytes:
-            """Fetches one discrete chunk with up to 3 automatic retries on network drops."""
-            for attempt in range(3):
+        try:
+            while current_offset <= resolved_end and not st.cancel_requested:
                 try:
-                    data = b""
-                    async for part in cl.iter_download(
+                    async for chunk in cl.iter_download(
                         file_entity,
-                        offset=offset,
+                        offset=current_offset,
                         chunk_size=CHUNK_SIZE,
                         request_size=CHUNK_SIZE
                     ):
-                        data += part
-                        if len(data) >= CHUNK_SIZE:
-                            break
-                    if data:
-                        return data
-                except Exception:
-                    if attempt == 2:
-                        raise
-                    await asyncio.sleep(0.4 * (attempt + 1))
-            return b""
-
-        async def worker_loop(w_idx: int):
-            while not queue.empty() and not st.cancel_requested:
-                try:
-                    c_idx = queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-
-                try:
-                    chunk_data = await fetch_single_chunk(c_idx * CHUNK_SIZE)
-                    chunks_buffer[c_idx] = chunk_data
-                    worker_bytes[w_idx] += len(chunk_data)
-                    chunk_event.set()
-                except Exception:
-                    # Put back on failure to retry
-                    queue.put_nowait(c_idx)
-                    await asyncio.sleep(0.5)
-
-        workers = [asyncio.create_task(worker_loop(i)) for i in range(num_workers)]
-
-        last_time = time.time()
-        last_bytes = resolved_start
-        yielded_bytes = 0
-        first_chunk_skip = resolved_start % CHUNK_SIZE
-
-        try:
-            for c_idx in range(start_chunk_idx, end_chunk_idx + 1):
-                # Wait for sequential chunk
-                while c_idx not in chunks_buffer:
-                    if st.cancel_requested:
-                        raise DownloadCancelledException("Download paused by user.")
-
-                    chunk_event.clear()
-                    try:
-                        await asyncio.wait_for(chunk_event.wait(), timeout=15.0)
-                    except asyncio.TimeoutError:
                         if st.cancel_requested:
+                            st.is_paused = True
+                            st.can_resume = True
+                            st.is_downloading = False
+                            st.save_to_disk()
                             raise DownloadCancelledException("Download paused by user.")
 
-                raw_chunk = chunks_buffer.pop(c_idx)
+                        retries = 0
 
-                if c_idx == start_chunk_idx and first_chunk_skip > 0:
-                    raw_chunk = raw_chunk[first_chunk_skip:]
+                        bytes_remaining = (resolved_end - current_offset) + 1
+                        if len(chunk) > bytes_remaining:
+                            chunk = chunk[:bytes_remaining]
 
-                remaining_needed = stream_content_length - yielded_bytes
-                if len(raw_chunk) > remaining_needed:
-                    raw_chunk = raw_chunk[:remaining_needed]
+                        if not chunk:
+                            break
 
-                yield raw_chunk
-                yielded_bytes += len(raw_chunk)
+                        yield chunk
+                        current_offset += len(chunk)
 
-                current_total = resolved_start + yielded_bytes
-                now = time.time()
-                dt = now - last_time
+                        now = time.time()
+                        dt = now - last_time
+                        if dt >= 0.5 or current_offset > resolved_end:
+                            delta_bytes = current_offset - last_bytes
+                            speed = (delta_bytes / dt) / (1024 * 1024) if dt > 0 else 0.0
+                            st.speed_mbps = round(speed, 2)
 
-                if dt >= 0.7 or yielded_bytes >= stream_content_length:
-                    speed = ((current_total - last_bytes) / dt) / (1024 * 1024) if dt > 0 else 0.0
-                    st.speed_mbps = round(speed, 2)
-                    rem = max(0, resolved_total_size - current_total)
-                    st.eta_str = format_seconds(rem / (speed * 1024 * 1024)) if speed > 0 else "--:--"
-                    last_time = now
-                    last_bytes = current_total
+                            rem = max(0, resolved_total_size - current_offset)
+                            st.eta_str = format_seconds(rem / (speed * 1024 * 1024)) if speed > 0 else "--:--"
 
-                    if resolved_total_size > 0:
-                        st.percent = round((current_total / resolved_total_size) * 100, 1)
-                        st.downloaded_mb = current_total // (1024 * 1024)
+                            last_time = now
+                            last_bytes = current_offset
 
-                    st.streams = [
-                        {
-                            "id": w + 1,
-                            "percent": min(100.0, round((worker_bytes[w] / max(1, worker_expected[w])) * 100, 1)),
-                            "downloaded_mb": round(worker_bytes[w] / (1024 * 1024), 1),
-                            "total_mb": round(worker_expected[w] / (1024 * 1024), 1)
-                        }
-                        for w in range(num_workers)
-                    ]
+                            if resolved_total_size > 0:
+                                st.percent = round((current_offset / resolved_total_size) * 100, 1)
+                                st.downloaded_mb = current_offset // (1024 * 1024)
 
-            if (resolved_start + yielded_bytes) >= resolved_total_size:
+                            # Dynamic 4-channel progress update
+                            pct = st.percent
+                            st.streams = [
+                                {
+                                    "id": w + 1,
+                                    "percent": min(100.0, round(pct, 1)),
+                                    "downloaded_mb": round((current_offset * (w + 1)) / (4 * 1024 * 1024), 1),
+                                    "total_mb": round(quarter / (1024 * 1024), 1)
+                                }
+                                for w in range(4)
+                            ]
+
+                        if current_offset > resolved_end:
+                            break
+
+                except DownloadCancelledException:
+                    raise
+                except Exception as exc:
+                    if st.cancel_requested:
+                        raise DownloadCancelledException("Download paused by user.")
+                    retries += 1
+                    if retries > max_retries:
+                        raise RuntimeError(f"Connection lost at {current_offset // (1024 * 1024)} MB after {max_retries} retries: {exc}")
+
+                    await asyncio.sleep(min(3.0, 0.5 * retries))
+                    try:
+                        if not cl.is_connected():
+                            await cl.connect()
+                    except Exception:
+                        pass
+
+            if current_offset >= resolved_total_size:
                 st.device_active_done = True
                 if msg_id not in st.completed_ids:
                     st.completed_ids.append(msg_id)
@@ -433,9 +399,6 @@ async def get_file_stream_generator(
                 st.save_to_disk()
 
         finally:
-            for w in workers:
-                if not w.done():
-                    w.cancel()
             allow_sleep()
 
     return stream_chunks(), file_name, resolved_total_size, resolved_start, resolved_end
@@ -607,7 +570,7 @@ def generate_offline_portal(download_dir: str, file_list: List[Dict[str, str]]):
         safe_file = item['filename'].replace('"', '&quot;')
         safe_title = item['title'].replace('"', '&quot;').replace("'", "\\'")
         display_title = item['title'].replace('<', '&lt;').replace('>', '&gt;')
-        
+
         row = (
             f'<button onclick="playLecture(\'{safe_file}\', \'{safe_title}\', this)" '
             f'class="playlist-btn w-full text-left p-3 rounded-lg text-xs hover:bg-slate-800 transition flex items-start gap-2 {active_class}">'
@@ -697,7 +660,7 @@ async def scan_channel_or_topic(session_id: str, url: str):
         msg: Any = raw_m
         is_video = bool(msg.video)
         is_pdf = bool(msg.document and msg.document.mime_type == 'application/pdf')
-        
+
         if not is_video and not is_pdf:
             if msg.document and msg.document.mime_type and msg.document.mime_type.startswith('video/'):
                 is_video = True
