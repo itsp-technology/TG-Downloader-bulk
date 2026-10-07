@@ -10,9 +10,9 @@ import subprocess
 import urllib.request
 import urllib.parse
 from typing import List, Optional
-from pydantic import BaseModel # type: ignore
-from fastapi import FastAPI, BackgroundTasks, Request, Response, Depends # type: ignore
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, HTMLResponse # type: ignore
+from pydantic import BaseModel
+from fastapi import FastAPI, BackgroundTasks, Request, Response, Depends
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, HTMLResponse
 
 from downloader import (
     get_session_ctx,
@@ -240,61 +240,48 @@ async def handle_logout(response: Response, sid: str = Depends(resolve_session_i
         return JSONResponse({"status": "error", "message": str(e)}, status_code=400)
 
 # ==============================================================================
-# NATIVE WINDOWS / LAPTOP FOLDER PICKER (RELIABLE POWERSHELL STA DIALOG)
+# NATIVE FOLDER PICKER (LOCAL WINDOWS STA DIALOG FALLBACK)
 # ==============================================================================
 def choose_folder_dialog(default_dir: str = "") -> str:
-    """Opens a native Folder Browser Dialog right in front of the browser window."""
-    if sys.platform == "win32":
-        try:
-            init_dir = os.path.abspath(default_dir) if (default_dir and os.path.isdir(default_dir)) else os.getcwd()
-            init_dir_esc = init_dir.replace("'", "''")
-            
-            # PowerShell in STA mode with TopMost ensures dialog opens directly over Chrome/Edge
-            ps_cmd = (
-                "Add-Type -AssemblyName System.Windows.Forms; "
-                "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog; "
-                f"$dialog.SelectedPath = '{init_dir_esc}'; "
-                "$dialog.Description = 'Select Destination Folder for Lectures'; "
-                "$dialog.ShowNewFolderButton = $true; "
-                "$form = New-Object System.Windows.Forms.Form; "
-                "$form.TopMost = $true; "
-                "if ($dialog.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) { "
-                "  [Console]::WriteLine($dialog.SelectedPath) "
-                "}"
-            )
-            
-            startupinfo = None
-            if hasattr(subprocess, "STARTUPINFO"):
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            
-            res = subprocess.run(
-                ["powershell.exe", "-NoProfile", "-STA", "-Command", ps_cmd],
-                capture_output=True,
-                text=True,
-                startupinfo=startupinfo,
-                timeout=180
-            )
-            selected_path = res.stdout.strip()
-            if selected_path and os.path.isdir(selected_path):
-                return os.path.normpath(selected_path)
-        except Exception as e:
-            print(f"[Browse Folder] PowerShell error: {e}")
+    """Safely checks if OS-level folder browsing is possible (only on local Windows)."""
+    if sys.platform != "win32":
+        # Cloud environments (Linux containers on Render) cannot run Windows GUI dialogs
+        return ""
 
-    # Fallback to Tkinter (for non-Windows environments)
     try:
-        import tkinter as tk
-        from tkinter import filedialog
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes('-topmost', True)
-        initial = default_dir if (default_dir and os.path.isdir(default_dir)) else os.getcwd()
-        selected = filedialog.askdirectory(initialdir=initial, title="Select Destination Folder")
-        root.destroy()
-        if selected and os.path.isdir(selected):
-            return os.path.normpath(selected)
+        init_dir = os.path.abspath(default_dir) if (default_dir and os.path.isdir(default_dir)) else os.getcwd()
+        init_dir_esc = init_dir.replace("'", "''")
+        
+        ps_cmd = (
+            "Add-Type -AssemblyName System.Windows.Forms; "
+            "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog; "
+            f"$dialog.SelectedPath = '{init_dir_esc}'; "
+            "$dialog.Description = 'Select Destination Folder for Lectures'; "
+            "$dialog.ShowNewFolderButton = $true; "
+            "$form = New-Object System.Windows.Forms.Form; "
+            "$form.TopMost = $true; "
+            "if ($dialog.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) { "
+            "  [Console]::WriteLine($dialog.SelectedPath) "
+            "}"
+        )
+        
+        startupinfo = None
+        if hasattr(subprocess, "STARTUPINFO"):
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        
+        res = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-STA", "-Command", ps_cmd],
+            capture_output=True,
+            text=True,
+            startupinfo=startupinfo,
+            timeout=120
+        )
+        selected_path = res.stdout.strip()
+        if selected_path and os.path.isdir(selected_path):
+            return os.path.normpath(selected_path)
     except Exception as e:
-        print(f"[Browse Folder] Tkinter fallback error: {e}")
+        print(f"[Browse Folder] Error: {e}")
 
     return ""
 

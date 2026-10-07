@@ -13,7 +13,7 @@
         <div class="flex items-center justify-between border-b border-slate-800 pb-5">
             <div>
                 <h1 class="text-2xl font-bold tracking-tight text-white flex items-center gap-2">
-                    <span class="p-2 bg-blue-600 rounded-lg text-lg">⚡</span> Batch Lecture Studio fix 
+                    <span class="p-2 bg-blue-600 rounded-lg text-lg">⚡</span> Batch Lecture Studio
                 </h1>
                 <p class="text-slate-400 text-xs mt-1">Multi-stream parallel lecture downloader with direct-to-device saving.</p>
             </div>
@@ -229,8 +229,10 @@
         let consecutiveErrors = 0;
         let isPollingActive = true;
         let currentAppMode = "server";
+        let selectedDirectoryHandle = null;
+        let laptopDirectStreamActive = false;
+        let laptopDirectStreamCancel = false;
 
-        // Accurate Mobile Detection (Only real mobile operating systems)
         function isMobileClient() {
             return /Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
         }
@@ -329,7 +331,7 @@
             }
         }
 
-        // Mobile Native Anchor Trigger (Eliminates Chrome insecure warning)
+        // Native Browser Anchor Trigger for Mobile
         function triggerNativeBrowserDownload(msgId, filename) {
             const a = document.createElement('a');
             a.style.display = 'none';
@@ -345,9 +347,62 @@
             }, 2500);
         }
 
-        // Handles Individual Lecture Click:
-        // On Mobile: streams straight into phone's Downloads folder.
-        // On Laptop: saves directly into selected local hard drive folder (NO BROWSER POPUPS).
+        // Native Web File System Access API: Saves file directly to folder on Laptop
+        async function writeStreamToLocalFolder(dirHandle, msgId, filename) {
+            const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
+            const writableStream = await fileHandle.createWritable();
+            
+            const response = await fetch(`/api/download-file/${msgId}`);
+            if (!response.ok) {
+                await writableStream.abort();
+                throw new Error(`Failed to stream lecture #${msgId}`);
+            }
+
+            // Pipe cloud bytes straight into laptop storage with zero browser prompts
+            await response.body.pipeTo(writableStream);
+        }
+
+        // Laptop Folder Browser (Supports Chrome/Edge Web API & Local OS Fallback)
+        async function browseFolder() {
+            const folderInput = document.getElementById('folderInput');
+            
+            // Web File System Access API (Works on Laptop Chrome/Edge across internet & localhost)
+            if ('showDirectoryPicker' in window) {
+                try {
+                    selectedDirectoryHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+                    folderInput.value = `[Laptop Folder] ${selectedDirectoryHandle.name}`;
+                    return;
+                } catch (err) {
+                    if (err.name !== 'AbortError') {
+                        console.error('Folder picker error:', err);
+                    }
+                    return;
+                }
+            }
+
+            // Fallback for local Python development without Web File System API
+            const btn = document.getElementById('browseBtn');
+            const origHtml = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<span>⏳</span> <span>Opening...</span>';
+
+            try {
+                const res = await fetch('/api/browse-folder', { method: 'POST' });
+                const data = await res.json();
+                if (data.status === 'ok' && data.path) {
+                    folderInput.value = data.path;
+                } else {
+                    alert('Please open this page in Google Chrome or Microsoft Edge on your laptop to select local folders.');
+                }
+            } catch (e) {
+                alert('Folder selection error: ' + e);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = origHtml;
+            }
+        }
+
+        // Handles Individual Lecture Click
         async function handleSingleDownload(msgId) {
             const authStatus = await checkTelegramAuth();
             if (!authStatus.authorized) {
@@ -356,16 +411,34 @@
                 return;
             }
 
+            const item = scannedItems.find(x => x.id === msgId);
+            const filename = item ? item.clean_filename : `Lecture_${msgId}.mp4`;
+
             if (isMobileClient()) {
-                const item = scannedItems.find(x => x.id === msgId);
-                const filename = item ? item.clean_filename : `Lecture_${msgId}.mp4`;
                 currentAppMode = "device";
                 triggerNativeBrowserDownload(msgId, filename);
                 pollStatus();
+            } else if (selectedDirectoryHandle) {
+                // Save directly to the chosen laptop folder
+                try {
+                    setActionButtonMode("downloading");
+                    document.getElementById('logText').innerText = `Saving directly to laptop folder: ${filename}...`;
+                    await writeStreamToLocalFolder(selectedDirectoryHandle, msgId, filename);
+                    if (!completedIds.includes(msgId)) completedIds.push(msgId);
+                    updateQueueBadges(false, false);
+                    document.getElementById('logText').innerText = `Saved ${filename} to laptop folder.`;
+                } catch (err) {
+                    alert(`Error saving to laptop folder: ${err.message}`);
+                } finally {
+                    setActionButtonMode("idle");
+                }
             } else {
-                // Laptop mode: Direct to chosen disk folder
+                // Local host disk save or browser download
                 const folderInput = document.getElementById('folderInput');
-                const folder = (folderInput && folderInput.value.trim()) ? folderInput.value.trim() : 'Downloads';
+                const folder = (folderInput && folderInput.value.trim() && !folderInput.value.startsWith('[')) 
+                    ? folderInput.value.trim() 
+                    : 'Downloads';
+                
                 try {
                     const res = await fetch('/api/start-download', {
                         method: 'POST',
@@ -373,18 +446,19 @@
                         body: JSON.stringify({ selected_ids: [msgId], folder_name: folder })
                     });
                     const data = await res.json();
-                    if (!res.ok) alert(data.message);
-                    else {
+                    if (!res.ok) {
+                        triggerNativeBrowserDownload(msgId, filename);
+                    } else {
                         currentAppMode = "server";
                         pollStatus();
                     }
                 } catch(e) {
-                    alert('Error: ' + e);
+                    triggerNativeBrowserDownload(msgId, filename);
                 }
             }
         }
 
-        // Main Batch Downloader Router
+        // Batch Download Router
         async function handleBatchDownloadClick() {
             const checked = Array.from(document.querySelectorAll('.item-chk:checked')).map(c => parseInt(c.value));
             if (checked.length === 0) return alert('Select at least one lecture!');
@@ -396,8 +470,24 @@
                 return;
             }
 
-            if (isMobileClient()) {
-                // Mobile: stream sequentially into phone Downloads
+            const isMobile = isMobileClient();
+
+            // SCENARIO 1: Laptop user selected a folder using 'Browse' (Zero prompts, direct write)
+            if (!isMobile && selectedDirectoryHandle) {
+                await runLaptopDirectoryBatchDownload(checked, selectedDirectoryHandle);
+                return;
+            }
+
+            // SCENARIO 2: Mobile device or fallback
+            if (isMobile || !selectedDirectoryHandle) {
+                if (!isMobile && !selectedDirectoryHandle) {
+                    const confirmDefault = confirm(
+                        "You haven't selected a laptop folder using 'Browse'.\n\n" +
+                        "Click OK to save into your browser's default 'Downloads' folder, or Cancel to click Browse first."
+                    );
+                    if (!confirmDefault) return;
+                }
+
                 try {
                     const res = await fetch('/api/device-batch/start', {
                         method: 'POST',
@@ -405,7 +495,7 @@
                         body: JSON.stringify({ selected_ids: checked })
                     });
                     const d = await res.json();
-                    if (!res.ok) return alert(d.message || 'Error starting mobile batch.');
+                    if (!res.ok) return alert(d.message || 'Error starting batch.');
                     if (d.status === "already_done") return alert(d.message);
 
                     currentAppMode = "device";
@@ -415,48 +505,65 @@
                 } catch (e) {
                     alert('Request error: ' + e);
                 }
-            } else {
-                // Laptop / PC: Save directly to the chosen local folder (NO BROWSER POPUPS)
-                const folderInput = document.getElementById('folderInput');
-                const folder = (folderInput && folderInput.value.trim()) ? folderInput.value.trim() : 'Downloads';
-
-                try {
-                    const res = await fetch('/api/start-download', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({ selected_ids: checked, folder_name: folder })
-                    });
-                    const data = await res.json();
-                    if (!res.ok) alert(data.message);
-                    else {
-                        currentAppMode = "server";
-                        pollStatus();
-                    }
-                } catch(e) {
-                    alert('Error: ' + e);
-                }
             }
         }
 
-        // Reliable Browse Folder Action on Laptop
-        async function browseFolder() {
-            const btn = document.getElementById('browseBtn');
-            const origHtml = btn.innerHTML;
-            btn.disabled = true;
-            btn.innerHTML = '<span>⏳</span> <span>Opening...</span>';
-
-            try {
-                const res = await fetch('/api/browse-folder', { method: 'POST' });
-                const data = await res.json();
-                if (data.status === 'ok' && data.path) {
-                    document.getElementById('folderInput').value = data.path;
-                }
-            } catch (e) {
-                alert('Folder picker request failed: ' + e);
-            } finally {
-                btn.disabled = false;
-                btn.innerHTML = origHtml;
+        // Direct-to-Folder Batch Engine for Laptop
+        async function runLaptopDirectoryBatchDownload(selectedIds, dirHandle) {
+            const pendingIds = selectedIds.filter(id => !completedIds.includes(id));
+            if (pendingIds.length === 0) {
+                return alert("All selected lectures are already completed!");
             }
+
+            laptopDirectStreamActive = true;
+            laptopDirectStreamCancel = false;
+            setActionButtonMode("downloading");
+
+            const logText = document.getElementById('logText');
+            const monFile = document.getElementById('monFile');
+            const monCounter = document.getElementById('monCounter');
+            const progressBar = document.getElementById('progressBar');
+
+            for (let i = 0; i < pendingIds.length; i++) {
+                if (laptopDirectStreamCancel) {
+                    logText.innerText = "Download stopped by user.";
+                    break;
+                }
+
+                const msgId = pendingIds[i];
+                const item = scannedItems.find(x => x.id === msgId);
+                const filename = item ? item.clean_filename : `Lecture_${msgId}.mp4`;
+
+                monCounter.innerText = `${i + 1} / ${pendingIds.length} Files`;
+                monFile.innerText = filename;
+                logText.innerText = `Saving directly to laptop folder: ${filename}...`;
+                progressBar.style.width = `${Math.round((i / pendingIds.length) * 100)}%`;
+
+                const rowBadge = document.getElementById(`badge-${msgId}`);
+                if (rowBadge) {
+                    rowBadge.innerText = "⏳ Saving...";
+                    rowBadge.className = "px-2 py-0.5 rounded text-[10px] font-semibold bg-blue-500/20 text-blue-300 border border-blue-500/30 animate-pulse";
+                }
+
+                try {
+                    await writeStreamToLocalFolder(dirHandle, msgId, filename);
+                    if (!completedIds.includes(msgId)) completedIds.push(msgId);
+                    if (rowBadge) {
+                        rowBadge.innerText = "✓ Done";
+                        rowBadge.className = "px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30";
+                    }
+                } catch (err) {
+                    console.error(err);
+                    logText.innerText = `Error saving ${filename}: ${err.message}`;
+                    break;
+                }
+            }
+
+            progressBar.style.width = "100%";
+            setActionButtonMode("idle");
+            laptopDirectStreamActive = false;
+            logText.innerText = laptopDirectStreamCancel ? "Download paused." : "All lectures saved directly into your laptop folder!";
+            pollStatus();
         }
 
         function toggleHashVisibility() {
@@ -648,7 +755,7 @@
                     } else {
                         document.getElementById('streamsContainer').classList.add('hidden');
                     }
-                } else {
+                } else if (!laptopDirectStreamActive) {
                     document.getElementById('speedMeter').innerText = "0.0 MB/s";
                     document.getElementById('etaMeter').innerText = "ETA: --:--";
                     document.getElementById('streamsContainer').classList.add('hidden');
@@ -739,6 +846,12 @@
         }
 
         async function handleActionClick() {
+            if (laptopDirectStreamActive) {
+                laptopDirectStreamCancel = true;
+                setActionButtonMode("idle");
+                return;
+            }
+
             if (currentMode === "downloading") {
                 const btn = document.getElementById('actionBtn');
                 btn.disabled = true;
